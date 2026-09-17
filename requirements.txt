@@ -1,6 +1,6 @@
+
 fastapi
 uvicorn
 python-multipart
-pyjwt
+python-dotenv
 requests
-huggingface_hub
