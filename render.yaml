@@ -1,14 +1,10 @@
+
 services:
   - type: web
-    name: appimgvid-backend
+    name: appimgvid-backend2026
     env: python
-    plan: free
-    rootDir: .
     buildCommand: pip install -r requirements.txt
-    startCommand: uvicorn main:app --host 0.0.0.0 --port 10000
-    healthCheckPath: /
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
     envVars:
-      - key: LLAMA_API_KEY
+      - key: AGNES_API_KEY
         sync: false
-      - key: JWT_SECRET
-        generateValue: true
