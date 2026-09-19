@@ -40,56 +40,124 @@ HARDCODED_AGNES_KEY = "PASTE_YOUR_AGNES_KEY_HERE"  # e.g. "sk_..."
 AGNES_BASE_CREATE = "https://apihub.agnes-ai.com/v1/videos"
 AGNES_BASE_GET = "https://apihub.agnes-ai.com/agnesapi"
 
+
 def upload_image_via_agnes(image_path: str, api_key: str) -> str:
     """Upload local image to Agnes Image API to get hosted URL that Video API can fetch"""
     import base64
     try:
         with open(image_path, 'rb') as f:
-            b64 = base64.b64encode(f.read()).decode('utf-8')
-        # Detect mime
+            raw = f.read()
+            b64 = base64.b64encode(raw).decode('utf-8')
         ext = image_path.split('.')[-1].lower()
         mime = 'image/jpeg' if ext in ['jpg','jpeg'] else 'image/png' if ext == 'png' else 'image/webp'
         data_uri = f"data:{mime};base64,{b64}"
-        print(f"Uploading image to Agnes Image API as data URI, size {len(data_uri)//1000}KB")
+        print(f"Uploading image to Agnes Image API, original {len(raw)//1024}KB, data URI {len(data_uri)//1000}KB")
         
         headers = {
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json"
         }
-        # Use image-to-image to get hosted URL - keep same image
-        # IMPORTANT: extra_body.image must be ARRAY per docs
-        payload = {
-            "model": "agnes-image-2.1-flash",
-            "prompt": "keep exactly same image, no changes, preserve original composition, high quality",
-            "size": "1024x768",
-            "extra_body": {
-                "image": [data_uri],
-                "response_format": "url"
+        # Try with different payloads - first try exact same size preservation
+        # Get image dimensions via Pillow if available
+        try:
+            from PIL import Image
+            with Image.open(image_path) as im:
+                w, h = im.size
+                # Use closest supported size
+                size_str = f"{w}x{h}"
+                print(f"Original image size: {size_str}")
+        except:
+            size_str = "768x1280"  # portrait default
+        
+        payloads = [
+            {
+                "model": "agnes-image-2.1-flash",
+                "prompt": "preserve original composition exactly, no changes, high quality, keep same",
+                "size": size_str,
+                "extra_body": {
+                    "image": [data_uri],
+                    "response_format": "url"
+                }
+            },
+            {
+                "model": "agnes-image-2.1-flash",
+                "prompt": "keep same image",
+                "size": "1024x1024",
+                "extra_body": {
+                    "image": [data_uri],
+                    "response_format": "url"
+                }
             }
-        }
-        r = requests.post("https://apihub.agnes-ai.com/v1/images/generations", headers=headers, json=payload, timeout=120)
-        print(f"Agnes Image upload response: {r.status_code} {r.text[:2000]}")
-        if r.status_code == 200:
-            data = r.json()
-            # Try various fields
-            if 'data' in data and len(data['data']) > 0:
-                url = data['data'][0].get('url')
-                if url:
-                    print(f"Agnes hosted image URL: {url}")
-                    return url
-            # Sometimes url at top level
-            if 'url' in data:
-                return data['url']
+        ]
+        
+        for payload in payloads:
+            try:
+                print(f"Trying Agnes image upload with size {payload['size']}")
+                r = requests.post("https://apihub.agnes-ai.com/v1/images/generations", headers=headers, json=payload, timeout=180)
+                print(f"Agnes Image upload response: {r.status_code} {r.text[:3000]}")
+                if r.status_code == 200:
+                    data = r.json()
+                    if 'data' in data and len(data['data']) > 0:
+                        url = data['data'][0].get('url')
+                        if url:
+                            print(f"Agnes hosted image URL: {url}")
+                            return url
+                    if 'url' in data:
+                        return data['url']
+                else:
+                    print(f"Agnes image upload failed payload {payload['size']}: {r.text[:1000]}")
+            except Exception as inner_e:
+                print(f"Payload {payload['size']} error: {inner_e}")
+                continue
+                
     except Exception as e:
         import traceback
         print(f"Agnes image upload failed: {e}")
         print(traceback.format_exc())
     return None
 
-def upload_image_public(image_path: str, api_key: str = "") -> str:
-    """Fallback: Upload image to catbox.moe for Agnes to fetch quickly"""
+def upload_to_0x0(image_path: str) -> str:
+    """Upload to 0x0.st - very reliable, no block"""
     try:
-        # Try catbox.moe first - fastest
+        with open(image_path, 'rb') as f:
+            files = {'file': f}
+            r = requests.post('https://0x0.st', files=files, timeout=30)
+            if r.status_code == 200 and r.text.startswith('http'):
+                url = r.text.strip()
+                print(f"0x0.st upload OK: {url}")
+                return url
+            print(f"0x0.st failed: {r.status_code} {r.text[:200]}")
+    except Exception as e:
+        print(f"0x0.st error: {e}")
+    return None
+
+def upload_to_fileio(image_path: str) -> str:
+    try:
+        with open(image_path, 'rb') as f:
+            files = {'file': f}
+            r = requests.post('https://file.io', files=files, timeout=30)
+            if r.status_code == 200:
+                data = r.json()
+                link = data.get('link')
+                if link:
+                    print(f"file.io upload OK: {link}")
+                    return link
+    except Exception as e:
+        print(f"file.io error: {e}")
+    return None
+
+
+def upload_image_public(image_path: str, api_key: str = "") -> str:
+    """Fallback: try multiple hosts"""
+    # Try 0x0.st first - most reliable
+    url = upload_to_0x0(image_path)
+    if url:
+        return url
+    url = upload_to_fileio(image_path)
+    if url:
+        return url
+    try:
+        # Try catbox.moe
         with open(image_path, 'rb') as f:
             files = {'fileToUpload': f}
             data = {'reqtype': 'fileupload'}
