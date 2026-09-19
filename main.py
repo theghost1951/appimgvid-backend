@@ -240,13 +240,41 @@ async def generate(
     final_duration = duration_seconds if duration_seconds is not None else duration
     final_camera = camera_json if camera_json else camera_control
     
-    is_portrait = aspect_ratio in ["9:16", "3:4", "2:3"]
-    if resolution == "640":
-        width, height = (640, 1152) if is_portrait else (1152, 640)
-    elif resolution == "720":
-        width, height = (720, 1280) if is_portrait else (1280, 720)
-    else:
-        width, height = (1080, 1920) if is_portrait else (1920, 1080)
+    # Fix aspect ratio handling - properly support 1:1, 4:3, 16:9, 9:16, etc.
+    def get_dimensions(res, aspect):
+        try:
+            # Parse aspect ratio like "16:9", "1:1"
+            if ":" in aspect:
+                w_ratio, h_ratio = map(float, aspect.split(":"))
+            else:
+                w_ratio, h_ratio = 16, 9  # default
+            
+            res_val = int(res) if str(res).isdigit() else 720
+            
+            if aspect == "1:1":
+                # Square
+                return (res_val, res_val) if res_val >= 640 else (640, 640)
+            elif w_ratio > h_ratio:
+                # Landscape: height = res, width = res * w/h
+                h = res_val
+                w = int(res_val * w_ratio / h_ratio)
+                # Round to multiple of 16 for codec compatibility
+                w = (w // 16) * 16
+                h = (h // 16) * 16
+                return (w, h)
+            else:
+                # Portrait: width = res, height = res * h/w
+                w = res_val
+                h = int(res_val * h_ratio / w_ratio)
+                w = (w // 16) * 16
+                h = (h // 16) * 16
+                return (w, h)
+        except Exception as e:
+            print(f"Aspect parse error {aspect}: {e}, default 1280x720")
+            return (1280, 720)
+    
+    width, height = get_dimensions(resolution, aspect_ratio)
+    print(f"Aspect {aspect_ratio} res {resolution} -> {width}x{height}")
 
     frame_rate = 24
     num_frames = final_duration * frame_rate
