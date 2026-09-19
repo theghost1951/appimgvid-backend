@@ -34,7 +34,7 @@ app.mount("/videos", StaticFiles(directory="videos"), name="videos")
 HISTORY = []
 
 # ===== PERMANENT KEY - PASTE YOUR KEY HERE =====
-HARDCODED_AGNES_KEY = "sk-SZvscFmSEY6Xz7eztzGXuUIky8q88Rh39eLtSG1vJkay6XYo"  # e.g. "sk_..." 
+HARDCODED_AGNES_KEY = "PASTE_YOUR_AGNES_KEY_HERE"  # e.g. "sk_..." 
 # ===============================================
 
 AGNES_BASE_CREATE = "https://apihub.agnes-ai.com/v1/videos"
@@ -313,9 +313,14 @@ async def generate(
                 "Content-Type": "application/json"
             }
             
-            # Combine motion prompt + camera control
+            # Combine motion prompt + camera control - FIX STATIC
             full_prompt = final_prompt
-            if final_camera and final_camera != "static":
+            if final_camera == "static":
+                full_prompt = f"{final_prompt}, static camera, fixed camera position, no camera movement, locked-off shot, tripod"
+                # Ensure negative prompt blocks camera motion when static
+                if "camera movement" not in negative_prompt.lower():
+                    negative_prompt = (negative_prompt + ", camera movement, camera shake, panning, tilting, zooming").strip(", ")
+            elif final_camera and final_camera != "static":
                 full_prompt = f"{final_prompt}, camera {final_camera}"
             
             payload = {
