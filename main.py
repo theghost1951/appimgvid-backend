@@ -10,6 +10,9 @@ Drop this into your GitHub repo as main.py, commit, Render will auto-redeploy
 from fastapi import FastAPI, File, UploadFile, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
+os.makedirs("videos", exist_ok=True)
+app.mount("/videos", StaticFiles(directory="videos"), name="videos")
 import shutil, os, uuid, json
 
 app = FastAPI(title="AppImgVid2 Backend - Agnes AI")
