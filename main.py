@@ -40,6 +40,49 @@ HARDCODED_AGNES_KEY = "PASTE_YOUR_AGNES_KEY_HERE"  # e.g. "sk_..."
 AGNES_BASE_CREATE = "https://apihub.agnes-ai.com/v1/videos"
 AGNES_BASE_GET = "https://apihub.agnes-ai.com/agnesapi"
 
+def upload_image_public(image_path: str) -> str:
+    """Upload image to catbox.moe for Agnes to fetch quickly"""
+    try:
+        # Try catbox.moe first - fastest
+        with open(image_path, 'rb') as f:
+            files = {'fileToUpload': f}
+            data = {'reqtype': 'fileupload'}
+            r = requests.post('https://catbox.moe/user/api.php', data=data, files=files, timeout=30)
+            if r.status_code == 200 and r.text.startswith('https://'):
+                url = r.text.strip()
+                print(f"Catbox upload OK: {url}")
+                return url
+            print(f"Catbox failed: {r.status_code} {r.text[:200]}")
+    except Exception as e:
+        print(f"Catbox upload error: {e}")
+    
+    try:
+        # Fallback: tmpfiles.org
+        with open(image_path, 'rb') as f:
+            files = {'file': f}
+            r = requests.post('https://tmpfiles.org/api/v1/upload', files=files, timeout=30)
+            if r.status_code == 200:
+                data = r.json()
+                url = data.get('data', {}).get('url', '')
+                if url:
+                    # Convert https://tmpfiles.org/dl/xxx to https://tmpfiles.org/dl/xxx direct
+                    # Actually need direct download link: replace /dl/ with direct? tmpfiles gives page, but we need direct
+                    # Use the url and replace to get direct
+                    direct = url.replace('tmpfiles.org/', 'tmpfiles.org/dl/')
+                    print(f"Tmpfiles upload OK: {direct}")
+                    return direct
+    except Exception as e:
+        print(f"Tmpfiles upload error: {e}")
+
+    # Last fallback: use Render URL (will likely timeout but try)
+    base_url = os.getenv("RENDER_EXTERNAL_URL") or "https://appimgvid-backend2026.onrender.com"
+    filename = os.path.basename(image_path)
+    fallback = f"{base_url}/videos/{filename}"
+    print(f"Using fallback Render URL: {fallback}")
+    return fallback
+
+
+
 def get_agnes_key(header_key: str = ""):
     # 1. Header from APK, 2. Render Env Var, 3. Hardcoded in code
     return header_key or os.getenv("AGNES_API_KEY") or os.getenv("AGNES_KEY") or HARDCODED_AGNES_KEY or ""
@@ -111,10 +154,10 @@ async def generate(
     with open(image_path, "wb") as buffer:
         shutil.copyfileobj(image.file, buffer)
     
-    # Public URL for Agnes to fetch image
-    # NOTE: Render URL must be public
     base_url = os.getenv("RENDER_EXTERNAL_URL") or "https://appimgvid-backend2026.onrender.com"
-    public_image_url = f"{base_url}/videos/{image_filename}"
+    # Upload to fast public host for Agnes
+    public_image_url = upload_image_public(image_path)
+    print(f"Public image for Agnes: {public_image_url}")
 
     print(f"[GENERATE] id={temp_id} prompt={final_prompt[:200]} {width}x{height} frames={num_frames} image_url={public_image_url}")
 
