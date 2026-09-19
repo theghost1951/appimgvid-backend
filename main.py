@@ -201,6 +201,19 @@ async def generate(
         shutil.copyfileobj(image.file, buffer)
     
     base_url = os.getenv("RENDER_EXTERNAL_URL") or "https://appimgvid-backend2026.onrender.com"
+    
+    # Try header from APK first, then env var - MUST be before upload
+    header_key = ""
+    if x_api_key:
+        header_key = x_api_key
+    elif authorization and "Bearer " in authorization:
+        header_key = authorization.replace("Bearer ", "").strip()
+    elif authorization:
+        header_key = authorization.strip()
+    agnes_key = get_agnes_key(header_key)
+    print(f"Key source: header={bool(header_key)} env={bool(os.getenv('AGNES_API_KEY'))} final_len={len(agnes_key)}")
+    print(f"DEBUG: agnes_key length={len(agnes_key)} starts_with={agnes_key[:10] if agnes_key else 'EMPTY'}")
+
     # Upload to fast public host for Agnes
     # Try Agnes hosted upload first (most reliable for video API)
     agnes_hosted = upload_image_via_agnes(image_path, agnes_key)
@@ -211,22 +224,10 @@ async def generate(
     print(f"Public image for Agnes: {public_image_url}")
 
     print(f"[GENERATE] id={temp_id} prompt={final_prompt[:200]} {width}x{height} frames={num_frames} image_url={public_image_url}")
-
-    # Try header from APK first, then env var
-    header_key = ""
-    if x_api_key:
-        header_key = x_api_key
-    elif authorization and "Bearer " in authorization:
-        header_key = authorization.replace("Bearer ", "").strip()
-    elif authorization:
-        header_key = authorization.strip()
-    agnes_key = get_agnes_key(header_key)
-    print(f"Key source: header={bool(header_key)} env={bool(os.getenv('AGNES_API_KEY'))} final_len={len(agnes_key)}")
     video_filename = f"{temp_id}.mp4"
     video_path = f"videos/{video_filename}"
     video_url = f"{base_url}/videos/{video_filename}"
 
-    print(f"DEBUG: agnes_key length={len(agnes_key)} starts_with={agnes_key[:10] if agnes_key else 'EMPTY'}")
     if not agnes_key:
         print("No AGNES_API_KEY set, creating static placeholder")
         try:
