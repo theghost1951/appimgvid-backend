@@ -57,14 +57,15 @@ def upload_image_via_agnes(image_path: str, api_key: str) -> str:
             "Content-Type": "application/json"
         }
         # Use image-to-image to get hosted URL - keep same image
+        # IMPORTANT: extra_body.image must be ARRAY per docs
         payload = {
             "model": "agnes-image-2.1-flash",
-            "prompt": "keep exactly same image, no changes, high quality",
+            "prompt": "keep exactly same image, no changes, preserve original composition, high quality",
+            "size": "1024x768",
             "extra_body": {
-                "image": data_uri,
+                "image": [data_uri],
                 "response_format": "url"
-            },
-            "size": "1024x768"
+            }
         }
         r = requests.post("https://apihub.agnes-ai.com/v1/images/generations", headers=headers, json=payload, timeout=120)
         print(f"Agnes Image upload response: {r.status_code} {r.text[:2000]}")
