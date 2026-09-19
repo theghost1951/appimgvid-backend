@@ -458,8 +458,10 @@ async def generate(
         "video_id": temp_id,
         "status": "queued",
         "message": "Generation started, poll /latest",
-        "videoUrl": "",
-        "poll_url": "/latest"
+        "videoUrl": None,
+        "video_url": None,
+        "url": None,
+        "poll_url": f"/status/{temp_id}"
     }
 
 @app.get("/status/{video_id}")
