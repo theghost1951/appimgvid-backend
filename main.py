@@ -240,41 +240,69 @@ async def generate(
     final_duration = duration_seconds if duration_seconds is not None else duration
     final_camera = camera_json if camera_json else camera_control
     
-    # Fix aspect ratio handling - properly support 1:1, 4:3, 16:9, 9:16, etc.
+    # Fix aspect ratio - use Agnes-compatible sizes
     def get_dimensions(res, aspect):
         try:
-            # Parse aspect ratio like "16:9", "1:1"
             if ":" in aspect:
                 w_ratio, h_ratio = map(float, aspect.split(":"))
             else:
-                w_ratio, h_ratio = 16, 9  # default
+                w_ratio, h_ratio = 16, 9
             
             res_val = int(res) if str(res).isdigit() else 720
             
+            # Agnes Video v2.0 supports these - use exact matches to avoid rejection
             if aspect == "1:1":
-                # Square
-                return (res_val, res_val) if res_val >= 640 else (640, 640)
-            elif w_ratio > h_ratio:
-                # Landscape: height = res, width = res * w/h
-                h = res_val
-                w = int(res_val * w_ratio / h_ratio)
-                # Round to multiple of 16 for codec compatibility
-                w = (w // 16) * 16
-                h = (h // 16) * 16
-                return (w, h)
+                # Square - Agnes prefers 1024x1024 or 720x720
+                if res_val <= 640:
+                    return (640, 640)
+                elif res_val <= 720:
+                    return (720, 720)
+                else:
+                    return (1024, 1024)  # 1080x1080 not always supported, 1024x1024 is safe
+            elif aspect == "16:9":
+                if res_val <= 640:
+                    return (1152, 640)
+                elif res_val <= 720:
+                    return (1280, 720)
+                else:
+                    return (1920, 1080)
+            elif aspect == "9:16":
+                if res_val <= 640:
+                    return (640, 1152)
+                elif res_val <= 720:
+                    return (720, 1280)
+                else:
+                    return (1080, 1920)
+            elif aspect == "4:3":
+                if res_val <= 720:
+                    return (960, 720)
+                else:
+                    return (1440, 1080)
+            elif aspect == "3:4":
+                if res_val <= 720:
+                    return (720, 960)
+                else:
+                    return (1080, 1440)
             else:
-                # Portrait: width = res, height = res * h/w
-                w = res_val
-                h = int(res_val * h_ratio / w_ratio)
-                w = (w // 16) * 16
-                h = (h // 16) * 16
-                return (w, h)
+                # Generic fallback
+                if w_ratio >= h_ratio:
+                    h = res_val
+                    w = int(res_val * w_ratio / h_ratio)
+                    w = (w // 16) * 16
+                    h = (h // 16) * 16
+                    return (w, h)
+                else:
+                    w = res_val
+                    h = int(res_val * h_ratio / w_ratio)
+                    w = (w // 16) * 16
+                    h = (h // 16) * 16
+                    return (w, h)
         except Exception as e:
             print(f"Aspect parse error {aspect}: {e}, default 1280x720")
             return (1280, 720)
     
     width, height = get_dimensions(resolution, aspect_ratio)
-    print(f"Aspect {aspect_ratio} res {resolution} -> {width}x{height}")
+    print(f"Aspect {aspect_ratio} res {resolution} -> {width}x{height} (Agnes compatible)")
 
     frame_rate = 24
     num_frames = final_duration * frame_rate
@@ -470,17 +498,24 @@ async def generate(
             print(traceback.format_exc())
             entry["status"] = "failed"
             entry["error"] = str(e)
-            try:
-                import subprocess
-                cmd = ["ffmpeg", "-y", "-loop", "1", "-i", image_path, "-c:v", "libx264", "-t", str(final_duration), "-pix_fmt", "yuv420p", "-vf", f"scale={width}:-2", video_path]
-                subprocess.run(cmd, capture_output=True, timeout=30)
-                if not os.path.exists(video_path):
-                    shutil.copy(image_path, video_path)
-                entry["videoUrl"] = video_url
-                entry["video_url"] = video_url
-                entry["url"] = video_url
-            except:
-                pass
+            # Only create static placeholder if NO key (expected behavior)
+            # If key exists but Agnes failed, DON'T create static - show failed so user knows
+            if not agnes_key:
+                try:
+                    import subprocess
+                    cmd = ["ffmpeg", "-y", "-loop", "1", "-i", image_path, "-c:v", "libx264", "-t", str(final_duration), "-pix_fmt", "yuv420p", "-vf", f"scale={width}:-2", video_path]
+                    subprocess.run(cmd, capture_output=True, timeout=30)
+                    if not os.path.exists(video_path):
+                        shutil.copy(image_path, video_path)
+                    entry["videoUrl"] = video_url
+                    entry["video_url"] = video_url
+                    entry["url"] = video_url
+                    entry["status"] = "completed"
+                except:
+                    pass
+            else:
+                print("Agnes failed but key exists - NOT creating static fallback, returning failed status")
+                # Leave videoUrl empty so APK shows error not static video
 
     import threading
     threading.Thread(target=do_generation, daemon=True).start()
