@@ -307,8 +307,8 @@ async def generate(
     frame_rate = 24
     num_frames = final_duration * frame_rate
     num_frames = ((num_frames // 8) * 8) + 1
-    if num_frames > 441:
-        num_frames = 441
+    if num_frames > 481:  # 20s *24 = 480 +1 = 481 max for v2.0 (5-20s)
+        num_frames = 481
     if num_frames < 9:
         num_frames = 9
 
@@ -431,7 +431,15 @@ async def generate(
             entry["status"] = "in_progress"
 
             agnes_video_url = None
-            for attempt in range(60):
+            # Polling scales with duration: 5s~90, 10s~150, 20s~250 attempts
+            if final_duration <= 5:
+                max_attempts = 90   # 450s
+            elif final_duration <= 10:
+                max_attempts = 150  # 750s
+            else:
+                max_attempts = 250  # 1250s = ~20 mins for 20s clip
+            print(f"Polling max {max_attempts} attempts for {final_duration}s video ({num_frames} frames)")
+            for attempt in range(max_attempts):
                 time.sleep(5)
                 try:
                     poll_url = f"{AGNES_BASE_GET}?video_id={video_id_agnes}&model_name=agnes-video-v2.0"
@@ -479,18 +487,28 @@ async def generate(
                 raise Exception("No video URL after polling")
             
             print(f"Downloading {agnes_video_url}")
-            r = requests.get(agnes_video_url, stream=True, timeout=120)
-            r.raise_for_status()
-            with open(video_path, "wb") as f:
-                for chunk in r.iter_content(chunk_size=8192):
-                    f.write(chunk)
+            try:
+                r = requests.get(agnes_video_url, stream=True, timeout=120)
+                r.raise_for_status()
+                with open(video_path, "wb") as f:
+                    for chunk in r.iter_content(chunk_size=8192):
+                        f.write(chunk)
+                size = os.path.getsize(video_path)
+                print(f"Saved {video_path} {size} bytes")
+                if size < 10000:
+                    print(f"WARNING: File too small, might be failed download")
+            except Exception as dl_e:
+                print(f"Download failed: {dl_e}, will use Agnes direct URL as fallback")
             
-            print(f"Saved {video_path} {os.path.getsize(video_path)} bytes")
+            # Store both local and direct URLs
             entry["videoUrl"] = video_url
             entry["video_url"] = video_url
             entry["url"] = video_url
+            entry["agnes_direct_url"] = agnes_video_url
+            entry["direct_url"] = agnes_video_url
             entry["status"] = "completed"
             entry["progress"] = 100
+            print(f"Completed entry: local {video_url} direct {agnes_video_url}")
             
         except Exception as e:
             import traceback
@@ -536,6 +554,13 @@ async def generate(
 async def get_status(video_id: str):
     for entry in reversed(HISTORY):
         if entry["id"] == video_id or entry.get("videoId") == video_id:
+            # If local file missing, return direct Agnes URL as fallback
+            video_path = entry.get("video_path")
+            if video_path and not os.path.exists(video_path):
+                print(f"Local file missing {video_path}, returning direct URL")
+                if entry.get("agnes_direct_url"):
+                    entry["videoUrl"] = entry["agnes_direct_url"]
+                    entry["video_url"] = entry["agnes_direct_url"]
             return entry
     return {"error": "not found", "id": video_id}
 
