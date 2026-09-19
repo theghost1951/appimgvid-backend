@@ -34,7 +34,7 @@ app.mount("/videos", StaticFiles(directory="videos"), name="videos")
 HISTORY = []
 
 # ===== PERMANENT KEY - PASTE YOUR KEY HERE =====
-HARDCODED_AGNES_KEY = "sk-SZvscFmSEY6Xz7eztzGXuUIky8q88Rh39eLtSG1vJkay6XYo"  # e.g. "sk_..." 
+HARDCODED_AGNES_KEY = "PASTE_YOUR_AGNES_KEY_HERE"  # e.g. "sk_..." 
 # ===============================================
 
 AGNES_BASE_CREATE = "https://apihub.agnes-ai.com/v1/videos"
@@ -132,6 +132,7 @@ async def generate(
     video_path = f"videos/{video_filename}"
     video_url = f"{base_url}/videos/{video_filename}"
 
+    print(f"DEBUG: agnes_key length={len(agnes_key)} starts_with={agnes_key[:10] if agnes_key else 'EMPTY'}")
     if not agnes_key:
         print("No AGNES_API_KEY set, creating static placeholder")
         try:
@@ -169,7 +170,7 @@ async def generate(
             print(f"Calling Agnes create: {AGNES_BASE_CREATE} payload={json.dumps(payload)[:500]}")
             
             resp = requests.post(AGNES_BASE_CREATE, headers=headers, json=payload, timeout=120)
-            print(f"Agnes create response: {resp.status_code} {resp.text[:1000]}")
+            print(f"Agnes create response: {resp.status_code} {resp.text[:2000]}")
             
             if resp.status_code != 200:
                 raise Exception(f"Agnes create failed {resp.status_code}: {resp.text}")
@@ -251,7 +252,9 @@ async def generate(
             print(f"Saved Agnes video to {video_path}, size {os.path.getsize(video_path)} bytes")
             
         except Exception as e:
+            import traceback
             print(f"Agnes generation failed: {e}")
+            print(traceback.format_exc())
             # Fallback to static if Agnes fails, so APK still gets a file
             try:
                 import subprocess
