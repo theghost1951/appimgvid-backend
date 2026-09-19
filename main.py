@@ -217,6 +217,7 @@ async def history():
 async def login(username: str = Form(...), password: str = Form(...)):
     return {"token": "dummy-token-for-apk", "access_token": "dummy-token-for-apk"}
 
+
 @app.post("/generate")
 async def generate(
     image: UploadFile = File(..., description="Reference image"),
@@ -238,21 +239,16 @@ async def generate(
     final_duration = duration_seconds if duration_seconds is not None else duration
     final_camera = camera_json if camera_json else camera_control
     
-    # Map aspect ratio to width/height
-    # 9:16 portrait 720x1280, 16:9 landscape 1280x720
     is_portrait = aspect_ratio in ["9:16", "3:4", "2:3"]
     if resolution == "640":
         width, height = (640, 1152) if is_portrait else (1152, 640)
     elif resolution == "720":
         width, height = (720, 1280) if is_portrait else (1280, 720)
-    else: # 1080
+    else:
         width, height = (1080, 1920) if is_portrait else (1920, 1080)
 
-    # Calculate frames: 8n+1 rule, 24fps
-    # duration 5s * 24fps = 120 frames -> 121 (8n+1)
     frame_rate = 24
     num_frames = final_duration * frame_rate
-    # Adjust to 8n+1
     num_frames = ((num_frames // 8) * 8) + 1
     if num_frames > 441:
         num_frames = 441
@@ -261,7 +257,6 @@ async def generate(
 
     temp_id = str(uuid.uuid4())
     
-    # Save uploaded image to videos/ so it has public URL for Agnes
     image_ext = image.filename.split(".")[-1] if "." in image.filename else "png"
     image_filename = f"{temp_id}_input.{image_ext}"
     image_path = f"videos/{image_filename}"
@@ -270,7 +265,6 @@ async def generate(
     
     base_url = os.getenv("RENDER_EXTERNAL_URL") or "https://appimgvid-backend2026.onrender.com"
     
-    # Try header from APK first, then env var - MUST be before upload
     header_key = ""
     if x_api_key:
         header_key = x_api_key
@@ -279,47 +273,72 @@ async def generate(
     elif authorization:
         header_key = authorization.strip()
     agnes_key = get_agnes_key(header_key)
-    print(f"Key source: header={bool(header_key)} env={bool(os.getenv('AGNES_API_KEY'))} final_len={len(agnes_key)}")
-    print(f"DEBUG: agnes_key length={len(agnes_key)} starts_with={agnes_key[:10] if agnes_key else 'EMPTY'}")
 
-    # Upload to fast public host for Agnes
-    # Try Agnes hosted upload first (most reliable for video API)
-    agnes_hosted = upload_image_via_agnes(image_path, agnes_key)
-    if agnes_hosted:
-        public_image_url = agnes_hosted
-    else:
-        public_image_url = upload_image_public(image_path, agnes_key)
-    print(f"Public image for Agnes: {public_image_url}")
-
-    print(f"[GENERATE] id={temp_id} prompt={final_prompt[:200]} {width}x{height} frames={num_frames} image_url={public_image_url}")
     video_filename = f"{temp_id}.mp4"
     video_path = f"videos/{video_filename}"
     video_url = f"{base_url}/videos/{video_filename}"
 
-    if not agnes_key:
-        print("No AGNES_API_KEY set, creating static placeholder")
+    entry = {
+        "id": temp_id,
+        "videoId": temp_id,
+        "videoUrl": "",
+        "video_url": "",
+        "url": "",
+        "status": "queued",
+        "progress": 0,
+        "prompt": final_prompt,
+        "motion_prompt": final_prompt,
+        "negative_prompt": negative_prompt,
+        "resolution": resolution,
+        "aspect_ratio": aspect_ratio,
+        "orientation": orientation,
+        "duration": final_duration,
+        "camera_control": final_camera,
+        "platform": platform,
+        "width": width,
+        "height": height,
+        "num_frames": num_frames,
+        "image_path": image_path,
+        "video_path": video_path,
+        "video_url_final": video_url
+    }
+    HISTORY.append(entry)
+
+    def do_generation():
         try:
-            import subprocess
-            cmd = ["ffmpeg", "-y", "-loop", "1", "-i", image_path, "-c:v", "libx264", "-t", str(final_duration), "-pix_fmt", "yuv420p", "-vf", f"scale={width}:-2", video_path]
-            subprocess.run(cmd, capture_output=True, timeout=30)
-        except Exception as e:
-            print(f"ffmpeg failed: {e}")
-            shutil.copy(image_path, video_path)
-    else:
-        # REAL AGNES CALL
-        try:
+            agnes_hosted = upload_image_via_agnes(image_path, agnes_key)
+            if agnes_hosted:
+                public_image_url = agnes_hosted
+            else:
+                public_image_url = upload_image_public(image_path, agnes_key)
+            print(f"Public image for Agnes: {public_image_url}")
+
+            if not agnes_key:
+                print("No key, static placeholder")
+                try:
+                    import subprocess
+                    cmd = ["ffmpeg", "-y", "-loop", "1", "-i", image_path, "-c:v", "libx264", "-t", str(final_duration), "-pix_fmt", "yuv420p", "-vf", f"scale={width}:-2", video_path]
+                    subprocess.run(cmd, capture_output=True, timeout=30)
+                except:
+                    shutil.copy(image_path, video_path)
+                entry["videoUrl"] = video_url
+                entry["video_url"] = video_url
+                entry["url"] = video_url
+                entry["status"] = "completed"
+                entry["progress"] = 100
+                return
+
             headers = {
                 "Authorization": f"Bearer {agnes_key}",
                 "Content-Type": "application/json"
             }
             
-            # Combine motion prompt + camera control - FIX STATIC
             full_prompt = final_prompt
+            neg_prompt = negative_prompt
             if final_camera == "static":
                 full_prompt = f"{final_prompt}, static camera, fixed camera position, no camera movement, locked-off shot, tripod"
-                # Ensure negative prompt blocks camera motion when static
-                if "camera movement" not in negative_prompt.lower():
-                    negative_prompt = (negative_prompt + ", camera movement, camera shake, panning, tilting, zooming").strip(", ")
+                if "camera movement" not in neg_prompt.lower():
+                    neg_prompt = (neg_prompt + ", camera movement, camera shake, panning, tilting, zooming").strip(", ")
             elif final_camera and final_camera != "static":
                 full_prompt = f"{final_prompt}, camera {final_camera}"
             
@@ -332,11 +351,10 @@ async def generate(
                 "num_frames": num_frames,
                 "frame_rate": frame_rate
             }
-            if negative_prompt:
-                payload["negative_prompt"] = negative_prompt
+            if neg_prompt:
+                payload["negative_prompt"] = neg_prompt
 
-            print(f"Calling Agnes create: {AGNES_BASE_CREATE} payload={json.dumps(payload)[:500]}")
-            
+            print(f"Calling Agnes create")
             resp = requests.post(AGNES_BASE_CREATE, headers=headers, json=payload, timeout=120)
             print(f"Agnes create response: {resp.status_code} {resp.text[:2000]}")
             
@@ -344,113 +362,116 @@ async def generate(
                 raise Exception(f"Agnes create failed {resp.status_code}: {resp.text}")
             
             data = resp.json()
-            video_id = data.get("video_id") or data.get("id") or data.get("task_id")
-            if not video_id:
-                raise Exception(f"No video_id in response: {data}")
+            video_id_agnes = data.get("video_id") or data.get("id") or data.get("task_id")
+            if not video_id_agnes:
+                raise Exception(f"No video_id: {data}")
             
-            print(f"Agnes video_id: {video_id}, polling...")
+            entry["agnes_video_id"] = video_id_agnes
+            entry["status"] = "in_progress"
 
-            # Poll for result - GET https://apihub.agnes-ai.com/agnesapi?video_id=xxx
             agnes_video_url = None
-            for attempt in range(60):  # up to 60 * 5s = 5 minutes
+            for attempt in range(60):
                 time.sleep(5)
                 try:
-                    poll_url = f"{AGNES_BASE_GET}?video_id={video_id}&model_name=agnes-video-v2.0"
+                    poll_url = f"{AGNES_BASE_GET}?video_id={video_id_agnes}&model_name=agnes-video-v2.0"
                     poll_resp = requests.get(poll_url, headers={"Authorization": f"Bearer {agnes_key}"}, timeout=30)
-                    print(f"Poll {attempt}: {poll_resp.status_code} {poll_resp.text[:1000]}")
+                    print(f"Poll {attempt}: {poll_resp.text[:1000]}")
                     
                     if poll_resp.status_code == 200:
                         poll_data = poll_resp.json()
-                        # Check various possible fields for video URL
-                        # According to docs, result contains video URL
                         status = poll_data.get("status") or poll_data.get("state")
                         progress = poll_data.get("progress", 0)
+                        entry["progress"] = progress
+                        entry["status"] = status or "in_progress"
                         
-                        # Try to find video URL - per docs field is remixed_from_video_id or url
-                        possible_url_fields = ["remixed_from_video_id", "video_url", "url", "result_url", "output_url", "videoUrl"]
-                        for field in possible_url_fields:
+                        for field in ["remixed_from_video_id", "video_url", "url", "result_url", "output_url", "videoUrl"]:
                             if field in poll_data and poll_data[field]:
                                 agnes_video_url = poll_data[field]
                                 break
                         
-                        # Sometimes URL is nested
                         if not agnes_video_url:
                             if "data" in poll_data and isinstance(poll_data["data"], dict):
-                                for field in possible_url_fields:
+                                for field in ["remixed_from_video_id", "video_url", "url"]:
                                     if field in poll_data["data"]:
                                         agnes_video_url = poll_data["data"][field]
                                         break
-                            if "result" in poll_data and isinstance(poll_data["result"], dict):
-                                for field in possible_url_fields:
-                                    if field in poll_data["result"]:
-                                        agnes_video_url = poll_data["result"][field]
-                                        break
                         
-                        # If status completed and no URL, try to parse all strings containing http and mp4
                         if not agnes_video_url and status in ["completed", "success", "done", "finished"]:
-                            # Look for any http url in response
-                            text = json.dumps(poll_data)
+                            txt = json.dumps(poll_data)
                             import re
-                            urls = re.findall(r'https://[^\s"\']+\.mp4[^\s"\']*', text)
-                            if urls:
-                                agnes_video_url = urls[0]
+                            m = re.search(r'https://[^\s"\']+\.mp4', txt)
+                            if m:
+                                agnes_video_url = m.group(0)
                         
                         if agnes_video_url:
                             print(f"Found Agnes video URL: {agnes_video_url}")
                             break
                         
                         if status in ["failed", "error"]:
-                            raise Exception(f"Agnes generation failed: {poll_data}")
+                            raise Exception(f"Agnes failed: {poll_data}")
                             
                 except Exception as e:
                     print(f"Poll error {attempt}: {e}")
                     continue
             
             if not agnes_video_url:
-                raise Exception("Agnes did not return video URL after polling")
+                raise Exception("No video URL after polling")
             
-            # Download Agnes video to our videos folder
-            print(f"Downloading Agnes video from {agnes_video_url} to {video_path}")
+            print(f"Downloading {agnes_video_url}")
             r = requests.get(agnes_video_url, stream=True, timeout=120)
             r.raise_for_status()
             with open(video_path, "wb") as f:
                 for chunk in r.iter_content(chunk_size=8192):
                     f.write(chunk)
             
-            print(f"Saved Agnes video to {video_path}, size {os.path.getsize(video_path)} bytes")
+            print(f"Saved {video_path} {os.path.getsize(video_path)} bytes")
+            entry["videoUrl"] = video_url
+            entry["video_url"] = video_url
+            entry["url"] = video_url
+            entry["status"] = "completed"
+            entry["progress"] = 100
             
         except Exception as e:
             import traceback
-            print(f"Agnes generation failed: {e}")
+            print(f"BG failed: {e}")
             print(traceback.format_exc())
-            # Fallback to static if Agnes fails, so APK still gets a file
+            entry["status"] = "failed"
+            entry["error"] = str(e)
             try:
                 import subprocess
                 cmd = ["ffmpeg", "-y", "-loop", "1", "-i", image_path, "-c:v", "libx264", "-t", str(final_duration), "-pix_fmt", "yuv420p", "-vf", f"scale={width}:-2", video_path]
                 subprocess.run(cmd, capture_output=True, timeout=30)
                 if not os.path.exists(video_path):
                     shutil.copy(image_path, video_path)
+                entry["videoUrl"] = video_url
+                entry["video_url"] = video_url
+                entry["url"] = video_url
             except:
-                shutil.copy(image_path, video_path)
+                pass
 
-    entry = {
+    import threading
+    threading.Thread(target=do_generation, daemon=True).start()
+
+    return {
         "id": temp_id,
         "videoId": temp_id,
-        "videoUrl": video_url,
-        "video_url": video_url,
-        "url": video_url,
-        "prompt": final_prompt,
-        "motion_prompt": final_prompt,
-        "negative_prompt": negative_prompt,
-        "resolution": resolution,
-        "aspect_ratio": aspect_ratio,
-        "orientation": orientation,
-        "duration": final_duration,
-        "camera_control": final_camera,
-        "platform": platform,
-        "width": width,
-        "height": height,
-        "num_frames": num_frames
+        "video_id": temp_id,
+        "status": "queued",
+        "message": "Generation started, poll /latest",
+        "videoUrl": "",
+        "poll_url": "/latest"
     }
-    HISTORY.append(entry)
-    return entry
+
+@app.get("/status/{video_id}")
+async def get_status(video_id: str):
+    for entry in reversed(HISTORY):
+        if entry["id"] == video_id or entry.get("videoId") == video_id:
+            return entry
+    return {"error": "not found", "id": video_id}
+
+@app.get("/video/{video_id}")
+async def get_video(video_id: str):
+    for entry in reversed(HISTORY):
+        if entry["id"] == video_id or entry.get("videoId") == video_id:
+            return entry
+    return {"error": "not found", "id": video_id}
