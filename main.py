@@ -40,8 +40,53 @@ HARDCODED_AGNES_KEY = "PASTE_YOUR_AGNES_KEY_HERE"  # e.g. "sk_..."
 AGNES_BASE_CREATE = "https://apihub.agnes-ai.com/v1/videos"
 AGNES_BASE_GET = "https://apihub.agnes-ai.com/agnesapi"
 
-def upload_image_public(image_path: str) -> str:
-    """Upload image to catbox.moe for Agnes to fetch quickly"""
+def upload_image_via_agnes(image_path: str, api_key: str) -> str:
+    """Upload local image to Agnes Image API to get hosted URL that Video API can fetch"""
+    import base64
+    try:
+        with open(image_path, 'rb') as f:
+            b64 = base64.b64encode(f.read()).decode('utf-8')
+        # Detect mime
+        ext = image_path.split('.')[-1].lower()
+        mime = 'image/jpeg' if ext in ['jpg','jpeg'] else 'image/png' if ext == 'png' else 'image/webp'
+        data_uri = f"data:{mime};base64,{b64}"
+        print(f"Uploading image to Agnes Image API as data URI, size {len(data_uri)//1000}KB")
+        
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json"
+        }
+        # Use image-to-image to get hosted URL - keep same image
+        payload = {
+            "model": "agnes-image-2.1-flash",
+            "prompt": "keep exactly same image, no changes, high quality",
+            "extra_body": {
+                "image": data_uri,
+                "response_format": "url"
+            },
+            "size": "1024x768"
+        }
+        r = requests.post("https://apihub.agnes-ai.com/v1/images/generations", headers=headers, json=payload, timeout=120)
+        print(f"Agnes Image upload response: {r.status_code} {r.text[:2000]}")
+        if r.status_code == 200:
+            data = r.json()
+            # Try various fields
+            if 'data' in data and len(data['data']) > 0:
+                url = data['data'][0].get('url')
+                if url:
+                    print(f"Agnes hosted image URL: {url}")
+                    return url
+            # Sometimes url at top level
+            if 'url' in data:
+                return data['url']
+    except Exception as e:
+        import traceback
+        print(f"Agnes image upload failed: {e}")
+        print(traceback.format_exc())
+    return None
+
+def upload_image_public(image_path: str, api_key: str = "") -> str:
+    """Fallback: Upload image to catbox.moe for Agnes to fetch quickly"""
     try:
         # Try catbox.moe first - fastest
         with open(image_path, 'rb') as f:
@@ -156,7 +201,12 @@ async def generate(
     
     base_url = os.getenv("RENDER_EXTERNAL_URL") or "https://appimgvid-backend2026.onrender.com"
     # Upload to fast public host for Agnes
-    public_image_url = upload_image_public(image_path)
+    # Try Agnes hosted upload first (most reliable for video API)
+    agnes_hosted = upload_image_via_agnes(image_path, agnes_key)
+    if agnes_hosted:
+        public_image_url = agnes_hosted
+    else:
+        public_image_url = upload_image_public(image_path, agnes_key)
     print(f"Public image for Agnes: {public_image_url}")
 
     print(f"[GENERATE] id={temp_id} prompt={final_prompt[:200]} {width}x{height} frames={num_frames} image_url={public_image_url}")
@@ -241,8 +291,8 @@ async def generate(
                         status = poll_data.get("status") or poll_data.get("state")
                         progress = poll_data.get("progress", 0)
                         
-                        # Try to find video URL
-                        possible_url_fields = ["video_url", "url", "result_url", "output_url", "videoUrl"]
+                        # Try to find video URL - per docs field is remixed_from_video_id or url
+                        possible_url_fields = ["remixed_from_video_id", "video_url", "url", "result_url", "output_url", "videoUrl"]
                         for field in possible_url_fields:
                             if field in poll_data and poll_data[field]:
                                 agnes_video_url = poll_data[field]
