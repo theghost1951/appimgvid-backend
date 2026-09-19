@@ -34,7 +34,8 @@ app.mount("/videos", StaticFiles(directory="videos"), name="videos")
 HISTORY = []
 
 # ===== PERMANENT KEY - PASTE YOUR KEY HERE =====
-HARDCODED_AGNES_KEY = "sk-SZvscFmSEY6Xz7eztzGXuUIky8q88Rh39eLtSG1vJkay6XYo"  # e.g. "sk_..." 
+HARDCODED_AGNES_KEY = "sk-SZvscFmSEY6Xz7eztzGXuUIky8q88Rh39eLtSG1vJkay6XYo"  # <-- REPLACE THIS WITH YOUR REAL KEY LIKE "sk-..."
+# If you leave this as PASTE_YOUR... you will get static videos with no motion!
 # ===============================================
 
 AGNES_BASE_CREATE = "https://apihub.agnes-ai.com/v1/videos"
@@ -207,18 +208,11 @@ async def root():
 
 @app.get("/latest")
 async def latest():
-    # Return most recent completed or in-progress
-    if not HISTORY:
-        return {"message": "no videos yet"}
-    # Prefer completed with videoUrl, else last entry
-    for entry in reversed(HISTORY):
-        if entry.get("videoUrl") or entry.get("url"):
-            return entry
-    return HISTORY[-1]
+    return HISTORY[-1] if HISTORY else {"message": "no videos yet"}
 
 @app.get("/history")
 async def history():
-    return list(reversed(HISTORY))  # newest first
+    return HISTORY
 
 @app.post("/login")
 async def login(username: str = Form(...), password: str = Form(...)):
@@ -280,6 +274,10 @@ async def generate(
     elif authorization:
         header_key = authorization.strip()
     agnes_key = get_agnes_key(header_key)
+    if not agnes_key or "PASTE_YOUR" in agnes_key:
+        print("WARNING: No Agnes key set! Will create static video with no motion!")
+        print("Please paste your real key in HARDCODED_AGNES_KEY at top of main.py")
+
 
     video_filename = f"{temp_id}.mp4"
     video_path = f"videos/{video_filename}"
@@ -313,18 +311,12 @@ async def generate(
 
     def do_generation():
         try:
-            entry["status"] = "uploading_image"
-            entry["message"] = "Uploading image to Agnes CDN..."
-            print(f"[BG {temp_id}] Uploading image...")
             agnes_hosted = upload_image_via_agnes(image_path, agnes_key)
             if agnes_hosted:
                 public_image_url = agnes_hosted
             else:
                 public_image_url = upload_image_public(image_path, agnes_key)
             print(f"Public image for Agnes: {public_image_url}")
-            entry["public_image_url"] = public_image_url
-            entry["status"] = "creating_video_task"
-            entry["message"] = "Creating Agnes video task..."
 
             if not agnes_key:
                 print("No key, static placeholder")
@@ -470,9 +462,11 @@ async def generate(
         "videoId": temp_id,
         "video_id": temp_id,
         "status": "queued",
-        "message": "Generation started, poll /latest",
-        "videoUrl": "",
-        "poll_url": "/latest"
+        "message": "Generation started, poll /status/{id}",
+        "videoUrl": None,
+        "video_url": None,
+        "url": None,
+        "poll_url": f"/status/{temp_id}"
     }
 
 @app.get("/status/{video_id}")
