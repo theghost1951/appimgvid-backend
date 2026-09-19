@@ -13,7 +13,7 @@ import json
 import time
 import requests
 
-from fastapi import FastAPI, File, UploadFile, Form
+from fastapi import FastAPI, File, UploadFile, Form, Header
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -33,11 +33,16 @@ app.mount("/videos", StaticFiles(directory="videos"), name="videos")
 
 HISTORY = []
 
+# ===== PERMANENT KEY - PASTE YOUR KEY HERE =====
+HARDCODED_AGNES_KEY = "PASTE_YOUR_AGNES_KEY_HERE"  # e.g. "sk_..." 
+# ===============================================
+
 AGNES_BASE_CREATE = "https://apihub.agnes-ai.com/v1/videos"
 AGNES_BASE_GET = "https://apihub.agnes-ai.com/agnesapi"
 
-def get_agnes_key():
-    return os.getenv("AGNES_API_KEY") or os.getenv("AGNES_KEY") or ""
+def get_agnes_key(header_key: str = ""):
+    # 1. Header from APK, 2. Render Env Var, 3. Hardcoded in code
+    return header_key or os.getenv("AGNES_API_KEY") or os.getenv("AGNES_KEY") or HARDCODED_AGNES_KEY or ""
 
 @app.get("/")
 async def root():
@@ -68,7 +73,9 @@ async def generate(
     duration_seconds: int = Form(None),
     camera_control: str = Form("static"),
     camera_json: str = Form(None),
-    platform: str = Form("agnes")
+    platform: str = Form("agnes"),
+    x_api_key: str = Header(None, alias="X-API-Key"),
+    authorization: str = Header(None)
 ):
     final_prompt = motion_prompt or prompt or ""
     final_duration = duration_seconds if duration_seconds is not None else duration
@@ -111,7 +118,16 @@ async def generate(
 
     print(f"[GENERATE] id={temp_id} prompt={final_prompt[:200]} {width}x{height} frames={num_frames} image_url={public_image_url}")
 
-    agnes_key = get_agnes_key()
+    # Try header from APK first, then env var
+    header_key = ""
+    if x_api_key:
+        header_key = x_api_key
+    elif authorization and "Bearer " in authorization:
+        header_key = authorization.replace("Bearer ", "").strip()
+    elif authorization:
+        header_key = authorization.strip()
+    agnes_key = get_agnes_key(header_key)
+    print(f"Key source: header={bool(header_key)} env={bool(os.getenv('AGNES_API_KEY'))} final_len={len(agnes_key)}")
     video_filename = f"{temp_id}.mp4"
     video_path = f"videos/{video_filename}"
     video_url = f"{base_url}/videos/{video_filename}"
