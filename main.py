@@ -207,11 +207,18 @@ async def root():
 
 @app.get("/latest")
 async def latest():
-    return HISTORY[-1] if HISTORY else {"message": "no videos yet"}
+    # Return most recent completed or in-progress
+    if not HISTORY:
+        return {"message": "no videos yet"}
+    # Prefer completed with videoUrl, else last entry
+    for entry in reversed(HISTORY):
+        if entry.get("videoUrl") or entry.get("url"):
+            return entry
+    return HISTORY[-1]
 
 @app.get("/history")
 async def history():
-    return HISTORY
+    return list(reversed(HISTORY))  # newest first
 
 @app.post("/login")
 async def login(username: str = Form(...), password: str = Form(...)):
@@ -306,12 +313,18 @@ async def generate(
 
     def do_generation():
         try:
+            entry["status"] = "uploading_image"
+            entry["message"] = "Uploading image to Agnes CDN..."
+            print(f"[BG {temp_id}] Uploading image...")
             agnes_hosted = upload_image_via_agnes(image_path, agnes_key)
             if agnes_hosted:
                 public_image_url = agnes_hosted
             else:
                 public_image_url = upload_image_public(image_path, agnes_key)
             print(f"Public image for Agnes: {public_image_url}")
+            entry["public_image_url"] = public_image_url
+            entry["status"] = "creating_video_task"
+            entry["message"] = "Creating Agnes video task..."
 
             if not agnes_key:
                 print("No key, static placeholder")
@@ -458,10 +471,8 @@ async def generate(
         "video_id": temp_id,
         "status": "queued",
         "message": "Generation started, poll /latest",
-        "videoUrl": None,
-        "video_url": None,
-        "url": None,
-        "poll_url": f"/status/{temp_id}"
+        "videoUrl": "",
+        "poll_url": "/latest"
     }
 
 @app.get("/status/{video_id}")
