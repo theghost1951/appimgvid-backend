@@ -117,8 +117,25 @@ def upload_image_via_agnes(image_path: str, api_key: str) -> str:
         print(traceback.format_exc())
     return None
 
+
+def upload_to_catbox(image_path: str) -> str:
+    """Catbox.moe - Most reliable for Agnes, direct URL"""
+    try:
+        with open(image_path, 'rb') as f:
+            files = {'fileToUpload': f}
+            data = {'reqtype': 'fileupload'}
+            r = requests.post('https://catbox.moe/user/api.php', data=data, files=files, timeout=30)
+            if r.status_code == 200 and r.text.startswith('https://'):
+                url = r.text.strip()
+                print(f"Catbox upload OK: {url}")
+                return url
+            print(f"Catbox failed: {r.status_code} {r.text[:200]}")
+    except Exception as e:
+        print(f"Catbox upload error: {e}")
+    return None
+
 def upload_to_0x0(image_path: str) -> str:
-    """Upload to 0x0.st - very reliable, no block"""
+    """0x0.st - sometimes blocked by Agnes"""
     try:
         with open(image_path, 'rb') as f:
             files = {'file': f}
@@ -147,32 +164,8 @@ def upload_to_fileio(image_path: str) -> str:
         print(f"file.io error: {e}")
     return None
 
-
-def upload_image_public(image_path: str, api_key: str = "") -> str:
-    """Fallback: try multiple hosts"""
-    # Try 0x0.st first - most reliable
-    url = upload_to_0x0(image_path)
-    if url:
-        return url
-    url = upload_to_fileio(image_path)
-    if url:
-        return url
+def upload_to_tmpfiles(image_path: str) -> str:
     try:
-        # Try catbox.moe
-        with open(image_path, 'rb') as f:
-            files = {'fileToUpload': f}
-            data = {'reqtype': 'fileupload'}
-            r = requests.post('https://catbox.moe/user/api.php', data=data, files=files, timeout=30)
-            if r.status_code == 200 and r.text.startswith('https://'):
-                url = r.text.strip()
-                print(f"Catbox upload OK: {url}")
-                return url
-            print(f"Catbox failed: {r.status_code} {r.text[:200]}")
-    except Exception as e:
-        print(f"Catbox upload error: {e}")
-    
-    try:
-        # Fallback: tmpfiles.org
         with open(image_path, 'rb') as f:
             files = {'file': f}
             r = requests.post('https://tmpfiles.org/api/v1/upload', files=files, timeout=30)
@@ -180,21 +173,46 @@ def upload_image_public(image_path: str, api_key: str = "") -> str:
                 data = r.json()
                 url = data.get('data', {}).get('url', '')
                 if url:
-                    # Convert https://tmpfiles.org/dl/xxx to https://tmpfiles.org/dl/xxx direct
-                    # Actually need direct download link: replace /dl/ with direct? tmpfiles gives page, but we need direct
-                    # Use the url and replace to get direct
                     direct = url.replace('tmpfiles.org/', 'tmpfiles.org/dl/')
                     print(f"Tmpfiles upload OK: {direct}")
                     return direct
     except Exception as e:
         print(f"Tmpfiles upload error: {e}")
+    return None
 
-    # Last fallback: use Render URL (will likely timeout but try)
+
+def upload_image_public(image_path: str, api_key: str = "") -> str:
+    """Try multiple hosts - prioritize catbox for Agnes compatibility"""
+    # Order: catbox (most reliable for AI), tmpfiles, 0x0, file.io
+    for func in [upload_to_catbox, upload_to_tmpfiles, upload_to_0x0, upload_to_fileio]:
+        url = func(image_path)
+        if url:
+            return url
+
+    # Last fallback: use Render URL (may timeout but try)
     base_url = os.getenv("RENDER_EXTERNAL_URL") or "https://appimgvid-backend2026.onrender.com"
     filename = os.path.basename(image_path)
     fallback = f"{base_url}/videos/{filename}"
     print(f"Using fallback Render URL: {fallback}")
     return fallback
+
+def get_all_public_urls(image_path: str):
+    """Get list of all possible public URLs to try sequentially if Agnes fails to fetch"""
+    urls = []
+    for func in [upload_to_catbox, upload_to_tmpfiles, upload_to_0x0, upload_to_fileio]:
+        try:
+            url = func(image_path)
+            if url and url not in urls:
+                urls.append(url)
+        except Exception as e:
+            print(f"get_all_public_urls {func.__name__} error: {e}")
+    # Add Render fallback
+    base_url = os.getenv("RENDER_EXTERNAL_URL") or "https://appimgvid-backend2026.onrender.com"
+    filename = os.path.basename(image_path)
+    fallback = f"{base_url}/videos/{filename}"
+    urls.append(fallback)
+    return urls
+
 
 
 
@@ -391,15 +409,21 @@ async def generate(
 
     def do_generation():
         try:
-            # FIX for 16:9 distortion: Use ORIGINAL image directly as first frame
-            # Do NOT re-generate via Agnes image model (that was cropping 16:9)
-            # Upload original file to public host first to preserve exact aspect
-            public_image_url = upload_image_public(image_path, agnes_key)
-            if not public_image_url:
-                # Fallback only if public hosts fail, try Agnes hosted
-                print("Public hosts failed, trying Agnes image hosting as fallback")
-                public_image_url = upload_image_via_agnes(image_path, agnes_key)
-            print(f"Public image for Agnes (ORIGINAL preserved): {public_image_url} - should be exact first frame")
+            # FIX for 16:9 distortion + Download failed: Use ORIGINAL image directly
+            # Try multiple public hosts sequentially if Agnes can't fetch
+            public_urls = get_all_public_urls(image_path)
+            if not public_urls:
+                print("All public hosts failed, trying Agnes image hosting as fallback")
+                agnes_hosted = upload_image_via_agnes(image_path, agnes_key)
+                if agnes_hosted:
+                    public_urls = [agnes_hosted]
+            
+            if not public_urls:
+                raise Exception("No public image URL available")
+            
+            public_image_url = public_urls[0]
+            print(f"Public image candidates: {public_urls}")
+            print(f"Trying first: {public_image_url} - should be exact first frame")
 
             if not agnes_key:
                 print("No key, static placeholder")
@@ -442,12 +466,30 @@ async def generate(
             if neg_prompt:
                 payload["negative_prompt"] = neg_prompt
 
-            print(f"Calling Agnes create")
-            resp = requests.post(AGNES_BASE_CREATE, headers=headers, json=payload, timeout=120)
-            print(f"Agnes create response: {resp.status_code} {resp.text[:2000]}")
+            # Try Agnes create with retry on different image hosts if Download failed
+            resp = None
+            last_error = None
+            for idx, img_url in enumerate(public_urls):
+                payload["image"] = img_url
+                print(f"Calling Agnes create attempt {idx+1}/{len(public_urls)} with image: {img_url}")
+                print(f"Payload: width={width} height={height} frames={num_frames}")
+                resp = requests.post(AGNES_BASE_CREATE, headers=headers, json=payload, timeout=120)
+                print(f"Agnes create response: {resp.status_code} {resp.text[:2000]}")
+                
+                if resp.status_code == 200:
+                    break  # success
+                
+                text = resp.text.lower()
+                if "download image url failed" in text or "connection reset" in text or "connection aborted" in text or "fail_to_fetch" in text:
+                    print(f"Agnes failed to fetch {img_url}, trying next host...")
+                    last_error = resp.text
+                    continue
+                else:
+                    # Other error, don't retry hosts
+                    break
             
-            if resp.status_code != 200:
-                raise Exception(f"Agnes create failed {resp.status_code}: {resp.text}")
+            if resp is None or resp.status_code != 200:
+                raise Exception(f"Agnes create failed {resp.status_code if resp else 'no response'}: {resp.text if resp else last_error}")
             
             data = resp.json()
             video_id_agnes = data.get("video_id") or data.get("id") or data.get("task_id")
