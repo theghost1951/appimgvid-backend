@@ -35,7 +35,7 @@ app.mount("/videos", StaticFiles(directory="videos"), name="videos")
 HISTORY = []
 
 # ===== PERMANENT KEY - PASTE YOUR KEY HERE =====
-HARDCODED_AGNES_KEY = "PASTE_YOUR_AGNES_KEY_HERE"  # <-- REPLACE THIS WITH YOUR REAL KEY LIKE "sk-..."
+HARDCODED_AGNES_KEY = "sk-SZvscFmSEY6Xz7eztzGXuUIky8q88Rh39eLtSG1vJkay6XYo"  # <-- REPLACE THIS WITH YOUR REAL KEY LIKE "sk-..."
 # If you leave this as PASTE_YOUR... you will get static videos with no motion!
 # ===============================================
 
