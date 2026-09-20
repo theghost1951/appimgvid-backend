@@ -118,6 +118,32 @@ def upload_image_via_agnes(image_path: str, api_key: str) -> str:
     return None
 
 
+
+def compress_image_for_upload(image_path: str, max_size=1920) -> str:
+    """Compress image to max 1920px to ensure Agnes can fetch it quickly"""
+    try:
+        from PIL import Image
+        with Image.open(image_path) as im:
+            iw, ih = im.size
+            if max(iw, ih) > max_size:
+                ratio = max_size / max(iw, ih)
+                new_w = int(iw * ratio)
+                new_h = int(ih * ratio)
+                im = im.resize((new_w, new_h), Image.LANCZOS)
+                # Save compressed version
+                compressed_path = image_path.replace(".", "_compressed.")
+                if compressed_path == image_path:
+                    compressed_path = image_path + "_compressed.jpg"
+                # Ensure jpg
+                if im.mode in ("RGBA", "LA", "P"):
+                    im = im.convert("RGB")
+                im.save(compressed_path, "JPEG", quality=85, optimize=True)
+                print(f"Compressed {iw}x{ih} -> {new_w}x{new_h} saved to {compressed_path}")
+                return compressed_path
+    except Exception as e:
+        print(f"Compress failed: {e}")
+    return image_path
+
 def upload_to_catbox(image_path: str) -> str:
     """Catbox.moe - Most reliable for Agnes, direct URL"""
     try:
@@ -183,9 +209,11 @@ def upload_to_tmpfiles(image_path: str) -> str:
 
 def upload_image_public(image_path: str, api_key: str = "") -> str:
     """Try multiple hosts - prioritize catbox for Agnes compatibility"""
+    # Compress first
+    comp_path = compress_image_for_upload(image_path)
     # Order: catbox (most reliable for AI), tmpfiles, 0x0, file.io
     for func in [upload_to_catbox, upload_to_tmpfiles, upload_to_0x0, upload_to_fileio]:
-        url = func(image_path)
+        url = func(comp_path)
         if url:
             return url
 
@@ -198,22 +226,40 @@ def upload_image_public(image_path: str, api_key: str = "") -> str:
 
 def get_all_public_urls(image_path: str):
     """Get list of all possible public URLs to try sequentially if Agnes fails to fetch"""
+    comp_path = compress_image_for_upload(image_path)
     urls = []
+    # Render first - your own server, should be most reliable if file exists
+    base_url = os.getenv("RENDER_EXTERNAL_URL") or "https://appimgvid-backend2026.onrender.com"
+    filename = os.path.basename(image_path)
+    render_url = f"{base_url}/videos/{filename}"
+    urls.append(render_url)
+    print(f"Added Render URL as first candidate: {render_url}")
+    
     for func in [upload_to_catbox, upload_to_tmpfiles, upload_to_0x0, upload_to_fileio]:
         try:
-            url = func(image_path)
+            url = func(comp_path)
             if url and url not in urls:
                 urls.append(url)
         except Exception as e:
             print(f"get_all_public_urls {func.__name__} error: {e}")
-    # Add Render fallback
-    base_url = os.getenv("RENDER_EXTERNAL_URL") or "https://appimgvid-backend2026.onrender.com"
-    filename = os.path.basename(image_path)
-    fallback = f"{base_url}/videos/{filename}"
-    urls.append(fallback)
     return urls
 
-
+def get_image_as_data_uri(image_path: str) -> str:
+    """Last resort: base64 data URI - some video APIs accept it"""
+    try:
+        import base64
+        comp_path = compress_image_for_upload(image_path, max_size=1280)  # smaller for data URI
+        with open(comp_path, 'rb') as f:
+            raw = f.read()
+            b64 = base64.b64encode(raw).decode('utf-8')
+        ext = comp_path.split('.')[-1].lower()
+        mime = 'image/jpeg' if ext in ['jpg','jpeg'] else 'image/png'
+        data_uri = f"data:{mime};base64,{b64}"
+        print(f"Created data URI {len(data_uri)//1000}KB")
+        return data_uri
+    except Exception as e:
+        print(f"Data URI failed: {e}")
+    return None
 
 
 def get_agnes_key(header_key: str = ""):
@@ -483,10 +529,22 @@ async def generate(
                 if "download image url failed" in text or "connection reset" in text or "connection aborted" in text or "fail_to_fetch" in text:
                     print(f"Agnes failed to fetch {img_url}, trying next host...")
                     last_error = resp.text
+                    # Small delay before next try
+                    time.sleep(1)
                     continue
                 else:
                     # Other error, don't retry hosts
                     break
+            
+            # FINAL FALLBACK: Try data URI if all URLs failed
+            if (resp is None or resp.status_code != 200) and last_error and "download image url failed" in last_error.lower():
+                print("All public URLs failed, trying data URI as last resort...")
+                data_uri = get_image_as_data_uri(image_path)
+                if data_uri:
+                    payload["image"] = data_uri
+                    print(f"Trying data URI {len(data_uri)//1000}KB")
+                    resp = requests.post(AGNES_BASE_CREATE, headers=headers, json=payload, timeout=120)
+                    print(f"Data URI attempt: {resp.status_code} {resp.text[:2000]}")
             
             if resp is None or resp.status_code != 200:
                 raise Exception(f"Agnes create failed {resp.status_code if resp else 'no response'}: {resp.text if resp else last_error}")
