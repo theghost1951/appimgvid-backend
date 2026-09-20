@@ -512,42 +512,66 @@ async def generate(
             if neg_prompt:
                 payload["negative_prompt"] = neg_prompt
 
-            # Try Agnes create with retry on different image hosts if Download failed
+            # Try Agnes create with retry on different image hosts if Download failed - FIXED for no response
             resp = None
             last_error = None
             for idx, img_url in enumerate(public_urls):
-                payload["image"] = img_url
-                print(f"Calling Agnes create attempt {idx+1}/{len(public_urls)} with image: {img_url}")
-                print(f"Payload: width={width} height={height} frames={num_frames}")
-                resp = requests.post(AGNES_BASE_CREATE, headers=headers, json=payload, timeout=120)
-                print(f"Agnes create response: {resp.status_code} {resp.text[:2000]}")
-                
-                if resp.status_code == 200:
-                    break  # success
-                
-                text = resp.text.lower()
-                if "download image url failed" in text or "connection reset" in text or "connection aborted" in text or "fail_to_fetch" in text:
-                    print(f"Agnes failed to fetch {img_url}, trying next host...")
-                    last_error = resp.text
-                    # Small delay before next try
-                    time.sleep(1)
+                try:
+                    payload["image"] = img_url
+                    print(f"Calling Agnes create attempt {idx+1}/{len(public_urls)} with image: {img_url}")
+                    print(f"Payload: width={width} height={height} frames={num_frames}")
+                    resp = requests.post(AGNES_BASE_CREATE, headers=headers, json=payload, timeout=180)
+                    print(f"Agnes create response: {resp.status_code} {resp.text[:2000]}")
+                    
+                    if resp.status_code == 200:
+                        break  # success
+                    
+                    text = resp.text.lower()
+                    if "download image url failed" in text or "connection reset" in text or "connection aborted" in text or "fail_to_fetch" in text or "400" in text:
+                        print(f"Agnes failed to fetch {img_url}, trying next host... error: {resp.text[:500]}")
+                        last_error = resp.text
+                        # Small delay before next try
+                        time.sleep(2)
+                        continue
+                    else:
+                        # Other error, don't retry hosts
+                        last_error = resp.text
+                        break
+                except Exception as req_e:
+                    print(f"Request exception for {img_url}: {req_e}")
+                    last_error = str(req_e)
+                    time.sleep(2)
                     continue
-                else:
-                    # Other error, don't retry hosts
-                    break
             
             # FINAL FALLBACK: Try data URI if all URLs failed
-            if (resp is None or resp.status_code != 200) and last_error and "download image url failed" in last_error.lower():
+            if (resp is None or (resp.status_code != 200 and last_error and "download image url failed" in last_error.lower())):
                 print("All public URLs failed, trying data URI as last resort...")
-                data_uri = get_image_as_data_uri(image_path)
-                if data_uri:
-                    payload["image"] = data_uri
-                    print(f"Trying data URI {len(data_uri)//1000}KB")
-                    resp = requests.post(AGNES_BASE_CREATE, headers=headers, json=payload, timeout=120)
-                    print(f"Data URI attempt: {resp.status_code} {resp.text[:2000]}")
+                try:
+                    data_uri = get_image_as_data_uri(image_path)
+                    if data_uri:
+                        payload["image"] = data_uri
+                        print(f"Trying data URI {len(data_uri)//1000}KB")
+                        resp = requests.post(AGNES_BASE_CREATE, headers=headers, json=payload, timeout=180)
+                        print(f"Data URI attempt: {resp.status_code if resp else 'no resp'} {resp.text[:2000] if resp else last_error}")
+                except Exception as uri_e:
+                    print(f"Data URI attempt exception: {uri_e}")
+                    last_error = f"{last_error} | Data URI error: {uri_e}"
+            
+            # If still no response after all retries, try ONE more time with Render URL only and longer timeout
+            if resp is None or resp.status_code != 200:
+                if "no response" in str(last_error).lower() or resp is None:
+                    print("No response after all hosts, retrying Render URL with 180s timeout...")
+                    try:
+                        render_url = public_urls[0] if public_urls else f"{base_url}/videos/{os.path.basename(image_path)}"
+                        payload["image"] = render_url
+                        resp = requests.post(AGNES_BASE_CREATE, headers=headers, json=payload, timeout=180)
+                        print(f"Render retry: {resp.status_code} {resp.text[:2000]}")
+                    except Exception as render_e:
+                        print(f"Render retry failed: {render_e}")
+                        last_error = f"{last_error} | Render retry: {render_e}"
             
             if resp is None or resp.status_code != 200:
-                raise Exception(f"Agnes create failed {resp.status_code if resp else 'no response'}: {resp.text if resp else last_error}")
+                raise Exception(f"Agnes create failed {resp.status_code if resp else 'no response'}: {resp.text if resp and hasattr(resp, 'text') else last_error}")
             
             data = resp.json()
             video_id_agnes = data.get("video_id") or data.get("id") or data.get("task_id")
