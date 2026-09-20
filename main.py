@@ -1,3 +1,4 @@
+
 """
 REAL Agnes AI integration for https://appimgvid-backend2026.onrender.com
 Now with actual motion - image-to-video via Agnes Video v2.0
@@ -34,7 +35,7 @@ app.mount("/videos", StaticFiles(directory="videos"), name="videos")
 HISTORY = []
 
 # ===== PERMANENT KEY - PASTE YOUR KEY HERE =====
-HARDCODED_AGNES_KEY = "sk-SZvscFmSEY6Xz7eztzGXuUIky8q88Rh39eLtSG1vJkay6XYo"  # <-- REPLACE THIS WITH YOUR REAL KEY LIKE "sk-..."
+HARDCODED_AGNES_KEY = "PASTE_YOUR_AGNES_KEY_HERE"  # <-- REPLACE THIS WITH YOUR REAL KEY LIKE "sk-..."
 # If you leave this as PASTE_YOUR... you will get static videos with no motion!
 # ===============================================
 
@@ -240,69 +241,72 @@ async def generate(
     final_duration = duration_seconds if duration_seconds is not None else duration
     final_camera = camera_json if camera_json else camera_control
     
-    # Fix aspect ratio - use Agnes-compatible sizes
-    def get_dimensions(res, aspect):
+    # NEW: 1) Use reference image as first frame, 2) Auto aspect from image, 3) 720p fixed
+    def get_dimensions_from_image(image_path, aspect_str, forced_res=720):
+        """Use actual image dimensions to preserve exact aspect ratio, supports 480/720/1080"""
         try:
-            if ":" in aspect:
-                w_ratio, h_ratio = map(float, aspect.split(":"))
+            from PIL import Image
+            with Image.open(image_path) as im:
+                iw, ih = im.size
+                print(f"Input image real size: {iw}x{ih} ratio {iw/ih:.3f}")
+                img_ratio = iw / ih if ih != 0 else 16/9
+                # Preserve exact ratio at chosen resolution
+                if img_ratio >= 1:  # landscape or square
+                    h = forced_res
+                    w = int(h * img_ratio)
+                else:  # portrait
+                    w = forced_res
+                    h = int(w / img_ratio)
+                # Make divisible by 16 (Agnes requirement)
+                w = (w // 16) * 16
+                h = (h // 16) * 16
+                # Clamp based on resolution tier
+                max_side = 1920 if forced_res == 1080 else 1280 if forced_res == 720 else 854
+                if w > max_side and img_ratio >= 1:
+                    w = max_side
+                    h = int(max_side / img_ratio)
+                    h = (h // 16) * 16
+                if h > max_side and img_ratio < 1:
+                    h = max_side
+                    w = int(max_side * img_ratio)
+                    w = (w // 16) * 16
+                print(f"Preserving input ratio -> output {w}x{h} at {forced_res}p")
+                return (w, h)
+        except Exception as e:
+            print(f"Could not read image size, fallback to aspect {aspect_str}: {e}")
+        
+        # Fallback to aspect string mapping at chosen resolution
+        try:
+            if ":" in aspect_str:
+                w_ratio, h_ratio = map(float, aspect_str.split(":"))
             else:
                 w_ratio, h_ratio = 16, 9
-            
-            res_val = int(res) if str(res).isdigit() else 720
-            
-            # Agnes Video v2.0 supports these - use exact matches to avoid rejection
-            if aspect == "1:1":
-                # Square - Agnes prefers 1024x1024 or 720x720
-                if res_val <= 640:
-                    return (640, 640)
-                elif res_val <= 720:
-                    return (720, 720)
-                else:
-                    return (1024, 1024)  # 1080x1080 not always supported, 1024x1024 is safe
-            elif aspect == "16:9":
-                if res_val <= 640:
-                    return (1152, 640)
-                elif res_val <= 720:
-                    return (1280, 720)
-                else:
-                    return (1920, 1080)
-            elif aspect == "9:16":
-                if res_val <= 640:
-                    return (640, 1152)
-                elif res_val <= 720:
-                    return (720, 1280)
-                else:
-                    return (1080, 1920)
-            elif aspect == "4:3":
-                if res_val <= 720:
-                    return (960, 720)
-                else:
-                    return (1440, 1080)
-            elif aspect == "3:4":
-                if res_val <= 720:
-                    return (720, 960)
-                else:
-                    return (1080, 1440)
+            res_val = forced_res
+            if w_ratio >= h_ratio:
+                h = res_val
+                w = int(res_val * w_ratio / h_ratio)
             else:
-                # Generic fallback
-                if w_ratio >= h_ratio:
-                    h = res_val
-                    w = int(res_val * w_ratio / h_ratio)
-                    w = (w // 16) * 16
-                    h = (h // 16) * 16
-                    return (w, h)
-                else:
-                    w = res_val
-                    h = int(res_val * h_ratio / w_ratio)
-                    w = (w // 16) * 16
-                    h = (h // 16) * 16
-                    return (w, h)
-        except Exception as e:
-            print(f"Aspect parse error {aspect}: {e}, default 1280x720")
+                w = res_val
+                h = int(res_val * h_ratio / w_ratio)
+            w = (w // 16) * 16
+            h = (h // 16) * 16
+            return (w, h)
+        except:
             return (1280, 720)
-    
-    width, height = get_dimensions(resolution, aspect_ratio)
-    print(f"Aspect {aspect_ratio} res {resolution} -> {width}x{height} (Agnes compatible)")
+
+    # Resolution choices 480p, 720p, 1080p - keep client choice
+    # Default to 720 if invalid
+    try:
+        res_val = int(resolution)
+        if res_val not in [480, 720, 1080]:
+            res_val = 720
+    except:
+        res_val = 720
+    resolution = str(res_val)
+    # width, height computed AFTER image saved (need image_path first)
+    # Placeholder, will recompute after save
+    width, height = (1280, 720)  # temp, overwritten after image save
+    print(f"Resolution {resolution}p chosen, aspect will be auto-detected from reference image (first frame)")
 
     frame_rate = 24
     num_frames = final_duration * frame_rate
@@ -319,6 +323,10 @@ async def generate(
     image_path = f"videos/{image_filename}"
     with open(image_path, "wb") as buffer:
         shutil.copyfileobj(image.file, buffer)
+    
+    # NOW compute exact dimensions from saved image - this is the first frame, with chosen resolution 480/720/1080
+    width, height = get_dimensions_from_image(image_path, aspect_ratio, forced_res=res_val)
+    print(f"FINAL: Using reference as first frame, auto aspect {aspect_ratio} -> {width}x{height} at {resolution}p")
     
     base_url = os.getenv("RENDER_EXTERNAL_URL") or "https://appimgvid-backend2026.onrender.com"
     
@@ -570,3 +578,4 @@ async def get_video(video_id: str):
         if entry["id"] == video_id or entry.get("videoId") == video_id:
             return entry
     return {"error": "not found", "id": video_id}
+
