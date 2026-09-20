@@ -1,4 +1,3 @@
-
 """
 REAL Agnes AI integration for https://appimgvid-backend2026.onrender.com
 Now with actual motion - image-to-video via Agnes Video v2.0
@@ -243,24 +242,41 @@ async def generate(
     
     # NEW: 1) Use reference image as first frame, 2) Auto aspect from image, 3) 720p fixed
     def get_dimensions_from_image(image_path, aspect_str, forced_res=720):
-        """Use actual image dimensions to preserve exact aspect ratio, supports 480/720/1080"""
+        """Use actual image dimensions to preserve exact aspect ratio, supports 480/720/1080 - FIXED for 16:9 distortion"""
         try:
             from PIL import Image
             with Image.open(image_path) as im:
                 iw, ih = im.size
-                print(f"Input image real size: {iw}x{ih} ratio {iw/ih:.3f}")
+                print(f"Input image real size: {iw}x{ih} ratio {iw/ih:.4f} forced_res={forced_res}")
                 img_ratio = iw / ih if ih != 0 else 16/9
-                # Preserve exact ratio at chosen resolution
-                if img_ratio >= 1:  # landscape or square
+                
+                # For 16:9, use exact standard sizes to avoid Agnes cropping
+                if abs(img_ratio - 16/9) < 0.05:  # close to 16:9
+                    if forced_res == 1080:
+                        return (1920, 1080)
+                    elif forced_res == 720:
+                        return (1280, 720)
+                    else:  # 480
+                        return (854, 480)
+                elif abs(img_ratio - 9/16) < 0.05:  # close to 9:16 - your working case
+                    if forced_res == 1080:
+                        return (1080, 1920)
+                    elif forced_res == 720:
+                        return (720, 1280)
+                    else:
+                        return (480, 854)
+                
+                # General case - preserve exact ratio
+                if img_ratio >= 1:  # landscape
                     h = forced_res
                     w = int(h * img_ratio)
                 else:  # portrait
                     w = forced_res
                     h = int(w / img_ratio)
-                # Make divisible by 16 (Agnes requirement)
+                # Make divisible by 16
                 w = (w // 16) * 16
                 h = (h // 16) * 16
-                # Clamp based on resolution tier
+                # Clamp
                 max_side = 1920 if forced_res == 1080 else 1280 if forced_res == 720 else 854
                 if w > max_side and img_ratio >= 1:
                     w = max_side
@@ -270,7 +286,7 @@ async def generate(
                     h = max_side
                     w = int(max_side * img_ratio)
                     w = (w // 16) * 16
-                print(f"Preserving input ratio -> output {w}x{h} at {forced_res}p")
+                print(f"Preserving input ratio {img_ratio:.4f} -> output {w}x{h} at {forced_res}p")
                 return (w, h)
         except Exception as e:
             print(f"Could not read image size, fallback to aspect {aspect_str}: {e}")
@@ -375,12 +391,15 @@ async def generate(
 
     def do_generation():
         try:
-            agnes_hosted = upload_image_via_agnes(image_path, agnes_key)
-            if agnes_hosted:
-                public_image_url = agnes_hosted
-            else:
-                public_image_url = upload_image_public(image_path, agnes_key)
-            print(f"Public image for Agnes: {public_image_url}")
+            # FIX for 16:9 distortion: Use ORIGINAL image directly as first frame
+            # Do NOT re-generate via Agnes image model (that was cropping 16:9)
+            # Upload original file to public host first to preserve exact aspect
+            public_image_url = upload_image_public(image_path, agnes_key)
+            if not public_image_url:
+                # Fallback only if public hosts fail, try Agnes hosted
+                print("Public hosts failed, trying Agnes image hosting as fallback")
+                public_image_url = upload_image_via_agnes(image_path, agnes_key)
+            print(f"Public image for Agnes (ORIGINAL preserved): {public_image_url} - should be exact first frame")
 
             if not agnes_key:
                 print("No key, static placeholder")
@@ -578,4 +597,3 @@ async def get_video(video_id: str):
         if entry["id"] == video_id or entry.get("videoId") == video_id:
             return entry
     return {"error": "not found", "id": video_id}
-
