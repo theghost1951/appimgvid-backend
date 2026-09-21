@@ -1,24 +1,25 @@
 """
-REAL Agnes AI integration for https://appimgvid-backend2026.onrender.com
-Now with actual motion - image-to-video via Agnes Video v2.0
+FREE Wan 2.1 Backend for AppImgVid - 100% FREE with Hugging Face API Key
+Replaces Agnes AI - Much more cinematic & realistic
 
-Deploy this as main.py
-Set AGNES_API_KEY in Render Env Vars
+Deploy this as main.py on Render
+Set HF_API_KEY in Render Env Vars (hf_xxx)
+
+Model: Wan-AI/Wan2.1-I2V-14B-720P - Best open-source image-to-video 2025
+Apache 2.0 license, free forever
 """
 
 import os
 import shutil
 import uuid
-import json
 import time
-import requests
+import traceback
 
 from fastapi import FastAPI, File, UploadFile, Form, Header
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-app = FastAPI(title="AppImgVid2 Backend - Agnes AI Real")
+app = FastAPI(title="AppImgVid Backend - Wan 2.1 FREE")
 
 app.add_middleware(
     CORSMiddleware,
@@ -33,242 +34,28 @@ app.mount("/videos", StaticFiles(directory="videos"), name="videos")
 
 HISTORY = []
 
-# ===== PERMANENT KEY - PASTE YOUR KEY HERE =====
-HARDCODED_AGNES_KEY = "sk-SZvscFmSEY6Xz7eztzGXuUIky8q88Rh39eLtSG1vJkay6XYo"  # <-- REPLACE THIS WITH YOUR REAL KEY LIKE "sk-..."
-# If you leave this as PASTE_YOUR... you will get static videos with no motion!
-# ===============================================
+# ===== PUT YOUR HF KEY HERE OR IN RENDER ENV =====
+HARDCODED_HF_KEY = "PASTE_YOUR_HF_KEY_HERE"  # hf_xxx...
+# =================================================
 
-AGNES_BASE_CREATE = "https://apihub.agnes-ai.com/v1/videos"
-AGNES_BASE_GET = "https://apihub.agnes-ai.com/agnesapi"
+HF_MODEL = "Wan-AI/Wan2.1-I2V-14B-720P"  # 720P cinematic
+HF_MODEL_FAST = "Wan-AI/Wan2.1-I2V-14B-480P"
 
-
-def upload_image_via_agnes(image_path: str, api_key: str) -> str:
-    """Upload local image to Agnes Image API to get hosted URL that Video API can fetch"""
-    import base64
-    try:
-        with open(image_path, 'rb') as f:
-            raw = f.read()
-            b64 = base64.b64encode(raw).decode('utf-8')
-        ext = image_path.split('.')[-1].lower()
-        mime = 'image/jpeg' if ext in ['jpg','jpeg'] else 'image/png' if ext == 'png' else 'image/webp'
-        data_uri = f"data:{mime};base64,{b64}"
-        print(f"Uploading image to Agnes Image API, original {len(raw)//1024}KB, data URI {len(data_uri)//1000}KB")
-        
-        headers = {
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json"
-        }
-        # Try with different payloads - first try exact same size preservation
-        # Get image dimensions via Pillow if available
-        try:
-            from PIL import Image
-            with Image.open(image_path) as im:
-                w, h = im.size
-                # Use closest supported size
-                size_str = f"{w}x{h}"
-                print(f"Original image size: {size_str}")
-        except:
-            size_str = "768x1280"  # portrait default
-        
-        payloads = [
-            {
-                "model": "agnes-image-2.1-flash",
-                "prompt": "preserve original composition exactly, no changes, high quality, keep same",
-                "size": size_str,
-                "extra_body": {
-                    "image": [data_uri],
-                    "response_format": "url"
-                }
-            },
-            {
-                "model": "agnes-image-2.1-flash",
-                "prompt": "keep same image",
-                "size": "1024x1024",
-                "extra_body": {
-                    "image": [data_uri],
-                    "response_format": "url"
-                }
-            }
-        ]
-        
-        for payload in payloads:
-            try:
-                print(f"Trying Agnes image upload with size {payload['size']}")
-                r = requests.post("https://apihub.agnes-ai.com/v1/images/generations", headers=headers, json=payload, timeout=180)
-                print(f"Agnes Image upload response: {r.status_code} {r.text[:3000]}")
-                if r.status_code == 200:
-                    data = r.json()
-                    if 'data' in data and len(data['data']) > 0:
-                        url = data['data'][0].get('url')
-                        if url:
-                            print(f"Agnes hosted image URL: {url}")
-                            return url
-                    if 'url' in data:
-                        return data['url']
-                else:
-                    print(f"Agnes image upload failed payload {payload['size']}: {r.text[:1000]}")
-            except Exception as inner_e:
-                print(f"Payload {payload['size']} error: {inner_e}")
-                continue
-                
-    except Exception as e:
-        import traceback
-        print(f"Agnes image upload failed: {e}")
-        print(traceback.format_exc())
-    return None
-
-
-
-def compress_image_for_upload(image_path: str, max_size=1920) -> str:
-    """Compress image to max 1920px to ensure Agnes can fetch it quickly"""
-    try:
-        from PIL import Image
-        with Image.open(image_path) as im:
-            iw, ih = im.size
-            if max(iw, ih) > max_size:
-                ratio = max_size / max(iw, ih)
-                new_w = int(iw * ratio)
-                new_h = int(ih * ratio)
-                im = im.resize((new_w, new_h), Image.LANCZOS)
-                # Save compressed version
-                compressed_path = image_path.replace(".", "_compressed.")
-                if compressed_path == image_path:
-                    compressed_path = image_path + "_compressed.jpg"
-                # Ensure jpg
-                if im.mode in ("RGBA", "LA", "P"):
-                    im = im.convert("RGB")
-                im.save(compressed_path, "JPEG", quality=85, optimize=True)
-                print(f"Compressed {iw}x{ih} -> {new_w}x{new_h} saved to {compressed_path}")
-                return compressed_path
-    except Exception as e:
-        print(f"Compress failed: {e}")
-    return image_path
-
-def upload_to_catbox(image_path: str) -> str:
-    """Catbox.moe - Most reliable for Agnes, direct URL"""
-    try:
-        with open(image_path, 'rb') as f:
-            files = {'fileToUpload': f}
-            data = {'reqtype': 'fileupload'}
-            r = requests.post('https://catbox.moe/user/api.php', data=data, files=files, timeout=30)
-            if r.status_code == 200 and r.text.startswith('https://'):
-                url = r.text.strip()
-                print(f"Catbox upload OK: {url}")
-                return url
-            print(f"Catbox failed: {r.status_code} {r.text[:200]}")
-    except Exception as e:
-        print(f"Catbox upload error: {e}")
-    return None
-
-def upload_to_0x0(image_path: str) -> str:
-    """0x0.st - sometimes blocked by Agnes"""
-    try:
-        with open(image_path, 'rb') as f:
-            files = {'file': f}
-            r = requests.post('https://0x0.st', files=files, timeout=30)
-            if r.status_code == 200 and r.text.startswith('http'):
-                url = r.text.strip()
-                print(f"0x0.st upload OK: {url}")
-                return url
-            print(f"0x0.st failed: {r.status_code} {r.text[:200]}")
-    except Exception as e:
-        print(f"0x0.st error: {e}")
-    return None
-
-def upload_to_fileio(image_path: str) -> str:
-    try:
-        with open(image_path, 'rb') as f:
-            files = {'file': f}
-            r = requests.post('https://file.io', files=files, timeout=30)
-            if r.status_code == 200:
-                data = r.json()
-                link = data.get('link')
-                if link:
-                    print(f"file.io upload OK: {link}")
-                    return link
-    except Exception as e:
-        print(f"file.io error: {e}")
-    return None
-
-def upload_to_tmpfiles(image_path: str) -> str:
-    try:
-        with open(image_path, 'rb') as f:
-            files = {'file': f}
-            r = requests.post('https://tmpfiles.org/api/v1/upload', files=files, timeout=30)
-            if r.status_code == 200:
-                data = r.json()
-                url = data.get('data', {}).get('url', '')
-                if url:
-                    direct = url.replace('tmpfiles.org/', 'tmpfiles.org/dl/')
-                    print(f"Tmpfiles upload OK: {direct}")
-                    return direct
-    except Exception as e:
-        print(f"Tmpfiles upload error: {e}")
-    return None
-
-
-def upload_image_public(image_path: str, api_key: str = "") -> str:
-    """Try multiple hosts - prioritize catbox for Agnes compatibility"""
-    # Compress first
-    comp_path = compress_image_for_upload(image_path)
-    # Order: catbox (most reliable for AI), tmpfiles, 0x0, file.io
-    for func in [upload_to_catbox, upload_to_tmpfiles, upload_to_0x0, upload_to_fileio]:
-        url = func(comp_path)
-        if url:
-            return url
-
-    # Last fallback: use Render URL (may timeout but try)
-    base_url = os.getenv("RENDER_EXTERNAL_URL") or "https://appimgvid-backend2026.onrender.com"
-    filename = os.path.basename(image_path)
-    fallback = f"{base_url}/videos/{filename}"
-    print(f"Using fallback Render URL: {fallback}")
-    return fallback
-
-def get_all_public_urls(image_path: str):
-    """Get list of all possible public URLs to try sequentially if Agnes fails to fetch"""
-    comp_path = compress_image_for_upload(image_path)
-    urls = []
-    # Render first - your own server, should be most reliable if file exists
-    base_url = os.getenv("RENDER_EXTERNAL_URL") or "https://appimgvid-backend2026.onrender.com"
-    filename = os.path.basename(image_path)
-    render_url = f"{base_url}/videos/{filename}"
-    urls.append(render_url)
-    print(f"Added Render URL as first candidate: {render_url}")
-    
-    for func in [upload_to_catbox, upload_to_tmpfiles, upload_to_0x0, upload_to_fileio]:
-        try:
-            url = func(comp_path)
-            if url and url not in urls:
-                urls.append(url)
-        except Exception as e:
-            print(f"get_all_public_urls {func.__name__} error: {e}")
-    return urls
-
-def get_image_as_data_uri(image_path: str) -> str:
-    """Last resort: base64 data URI - some video APIs accept it"""
-    try:
-        import base64
-        comp_path = compress_image_for_upload(image_path, max_size=1280)  # smaller for data URI
-        with open(comp_path, 'rb') as f:
-            raw = f.read()
-            b64 = base64.b64encode(raw).decode('utf-8')
-        ext = comp_path.split('.')[-1].lower()
-        mime = 'image/jpeg' if ext in ['jpg','jpeg'] else 'image/png'
-        data_uri = f"data:{mime};base64,{b64}"
-        print(f"Created data URI {len(data_uri)//1000}KB")
-        return data_uri
-    except Exception as e:
-        print(f"Data URI failed: {e}")
-    return None
-
-
-def get_agnes_key(header_key: str = ""):
-    # 1. Header from APK, 2. Render Env Var, 3. Hardcoded in code
-    return header_key or os.getenv("AGNES_API_KEY") or os.getenv("AGNES_KEY") or HARDCODED_AGNES_KEY or ""
+def get_hf_key(header_key: str = ""):
+    return header_key or os.getenv("HF_API_KEY") or os.getenv("HUGGINGFACE_API_KEY") or HARDCODED_HF_KEY or ""
 
 @app.get("/")
 async def root():
-    return {"status": "ok", "service": "AppImgVid2 Agnes AI Real", "endpoints": ["/generate", "/history", "/latest", "/login"], "agnes_key_set": bool(get_agnes_key())}
+    has_key = bool(get_hf_key())
+    return {
+        "status": "ok", 
+        "service": "AppImgVid Wan2.1 FREE", 
+        "model": HF_MODEL,
+        "endpoints": ["/generate", "/status/{id}", "/history", "/latest"],
+        "hf_key_set": has_key,
+        "free": True,
+        "cinematic": True
+    }
 
 @app.get("/latest")
 async def latest():
@@ -280,135 +67,65 @@ async def history():
 
 @app.post("/login")
 async def login(username: str = Form(...), password: str = Form(...)):
-    return {"token": "dummy-token-for-apk", "access_token": "dummy-token-for-apk"}
+    return {"token": "hf-free-token", "access_token": "hf-free-token"}
 
+def compress_image_for_wan(image_path: str, max_size=1280) -> str:
+    try:
+        from PIL import Image
+        with Image.open(image_path) as im:
+            iw, ih = im.size
+            if max(iw, ih) > max_size:
+                ratio = max_size / max(iw, ih)
+                new_w = int(iw * ratio)
+                new_h = int(ih * ratio)
+                im = im.resize((new_w, new_h), Image.LANCZOS)
+                compressed_path = image_path.replace(".", "_wan.")
+                if im.mode in ("RGBA", "LA", "P"):
+                    im = im.convert("RGB")
+                im.save(compressed_path, "JPEG", quality=90, optimize=True)
+                print(f"Wan compress {iw}x{ih} -> {new_w}x{new_h}")
+                return compressed_path
+    except Exception as e:
+        print(f"Wan compress failed: {e}")
+    return image_path
 
 @app.post("/generate")
 async def generate(
-    image: UploadFile = File(..., description="Reference image"),
+    image: UploadFile = File(..., description="Reference image - first frame"),
     motion_prompt: str = Form(..., description="Motion prompt"),
     prompt: str = Form(None),
     negative_prompt: str = Form(""),
-    resolution: str = Form("1080"),
+    resolution: str = Form("720"),
     aspect_ratio: str = Form("16:9"),
     orientation: str = Form("landscape"),
-    duration: int = Form(8),
+    duration: int = Form(5),
     duration_seconds: int = Form(None),
     camera_control: str = Form("static"),
     camera_json: str = Form(None),
-    platform: str = Form("agnes"),
+    platform: str = Form("wan"),
     x_api_key: str = Header(None, alias="X-API-Key"),
     authorization: str = Header(None)
 ):
-    final_prompt = motion_prompt or prompt or ""
+    final_prompt = motion_prompt or prompt or "cinematic smooth motion"
     final_duration = duration_seconds if duration_seconds is not None else duration
+    final_duration = max(2, min(10, final_duration))
     final_camera = camera_json if camera_json else camera_control
     
-    # NEW: 1) Use reference image as first frame, 2) Auto aspect from image, 3) 720p fixed
-    def get_dimensions_from_image(image_path, aspect_str, forced_res=720):
-        """Use actual image dimensions to preserve exact aspect ratio, supports 480/720/1080 - FIXED for 16:9 distortion"""
-        try:
-            from PIL import Image
-            with Image.open(image_path) as im:
-                iw, ih = im.size
-                print(f"Input image real size: {iw}x{ih} ratio {iw/ih:.4f} forced_res={forced_res}")
-                img_ratio = iw / ih if ih != 0 else 16/9
-                
-                # For 16:9, use exact standard sizes to avoid Agnes cropping
-                if abs(img_ratio - 16/9) < 0.05:  # close to 16:9
-                    if forced_res == 1080:
-                        return (1920, 1080)
-                    elif forced_res == 720:
-                        return (1280, 720)
-                    else:  # 480
-                        return (854, 480)
-                elif abs(img_ratio - 9/16) < 0.05:  # close to 9:16 - your working case
-                    if forced_res == 1080:
-                        return (1080, 1920)
-                    elif forced_res == 720:
-                        return (720, 1280)
-                    else:
-                        return (480, 854)
-                
-                # General case - preserve exact ratio
-                if img_ratio >= 1:  # landscape
-                    h = forced_res
-                    w = int(h * img_ratio)
-                else:  # portrait
-                    w = forced_res
-                    h = int(w / img_ratio)
-                # Make divisible by 16
-                w = (w // 16) * 16
-                h = (h // 16) * 16
-                # Clamp
-                max_side = 1920 if forced_res == 1080 else 1280 if forced_res == 720 else 854
-                if w > max_side and img_ratio >= 1:
-                    w = max_side
-                    h = int(max_side / img_ratio)
-                    h = (h // 16) * 16
-                if h > max_side and img_ratio < 1:
-                    h = max_side
-                    w = int(max_side * img_ratio)
-                    w = (w // 16) * 16
-                print(f"Preserving input ratio {img_ratio:.4f} -> output {w}x{h} at {forced_res}p")
-                return (w, h)
-        except Exception as e:
-            print(f"Could not read image size, fallback to aspect {aspect_str}: {e}")
-        
-        # Fallback to aspect string mapping at chosen resolution
-        try:
-            if ":" in aspect_str:
-                w_ratio, h_ratio = map(float, aspect_str.split(":"))
-            else:
-                w_ratio, h_ratio = 16, 9
-            res_val = forced_res
-            if w_ratio >= h_ratio:
-                h = res_val
-                w = int(res_val * w_ratio / h_ratio)
-            else:
-                w = res_val
-                h = int(res_val * h_ratio / w_ratio)
-            w = (w // 16) * 16
-            h = (h // 16) * 16
-            return (w, h)
-        except:
-            return (1280, 720)
-
-    # Resolution choices 480p, 720p, 1080p - keep client choice
-    # Default to 720 if invalid
     try:
         res_val = int(resolution)
         if res_val not in [480, 720, 1080]:
             res_val = 720
     except:
         res_val = 720
-    resolution = str(res_val)
-    # width, height computed AFTER image saved (need image_path first)
-    # Placeholder, will recompute after save
-    width, height = (1280, 720)  # temp, overwritten after image save
-    print(f"Resolution {resolution}p chosen, aspect will be auto-detected from reference image (first frame)")
-
-    frame_rate = 24
-    num_frames = final_duration * frame_rate
-    num_frames = ((num_frames // 8) * 8) + 1
-    if num_frames > 481:  # 20s *24 = 480 +1 = 481 max for v2.0 (5-20s)
-        num_frames = 481
-    if num_frames < 9:
-        num_frames = 9
-
-    temp_id = str(uuid.uuid4())
     
-    image_ext = image.filename.split(".")[-1] if "." in image.filename else "png"
+    temp_id = str(uuid.uuid4())
+    image_ext = image.filename.split(".")[-1] if "." in image.filename else "jpg"
     image_filename = f"{temp_id}_input.{image_ext}"
     image_path = f"videos/{image_filename}"
     with open(image_path, "wb") as buffer:
         shutil.copyfileobj(image.file, buffer)
     
-    # NOW compute exact dimensions from saved image - this is the first frame, with chosen resolution 480/720/1080
-    width, height = get_dimensions_from_image(image_path, aspect_ratio, forced_res=res_val)
-    print(f"FINAL: Using reference as first frame, auto aspect {aspect_ratio} -> {width}x{height} at {resolution}p")
-    
-    base_url = os.getenv("RENDER_EXTERNAL_URL") or "https://appimgvid-backend2026.onrender.com"
+    wan_image_path = compress_image_for_wan(image_path, max_size=1280 if res_val >= 720 else 854)
     
     header_key = ""
     if x_api_key:
@@ -417,301 +134,206 @@ async def generate(
         header_key = authorization.replace("Bearer ", "").strip()
     elif authorization:
         header_key = authorization.strip()
-    agnes_key = get_agnes_key(header_key)
-    if not agnes_key or "PASTE_YOUR" in agnes_key:
-        print("WARNING: No Agnes key set! Will create static video with no motion!")
-        print("Please paste your real key in HARDCODED_AGNES_KEY at top of main.py")
-
-
+    
+    hf_key = get_hf_key(header_key)
+    
+    base_url = os.getenv("RENDER_EXTERNAL_URL") or "https://appimgvid-backend2026.onrender.com"
     video_filename = f"{temp_id}.mp4"
     video_path = f"videos/{video_filename}"
     video_url = f"{base_url}/videos/{video_filename}"
-
+    
+    camera_prompt_map = {
+        "static": "static camera, locked-off shot, tripod, no camera movement, stable",
+        "tilt up": "camera tilt up, smooth upward tilt, cinematic",
+        "tilt down": "camera tilt down, smooth downward tilt, cinematic",
+        "pan left": "camera pan left, smooth left pan, cinematic",
+        "pan right": "camera pan right, smooth right pan, cinematic",
+        "orbit": "camera orbit around subject, circular movement, cinematic, 3d parallax",
+        "zoom in": "camera zoom in, slow push in, cinematic",
+        "zoom out": "camera zoom out, slow pull out, cinematic"
+    }
+    camera_add = camera_prompt_map.get(final_camera.lower(), final_camera if final_camera != "static" else camera_prompt_map["static"])
+    full_prompt = f"{final_prompt}, {camera_add}, cinematic, realistic, highly detailed, 4k, smooth motion, natural movement"
+    
+    base_negative = "face change, different face, face swap, distorted face, blurry, low quality, low resolution, distorted, ugly, bad anatomy, watermark"
+    neg_prompt = f"{negative_prompt}, {base_negative}" if negative_prompt else base_negative
+    
     entry = {
         "id": temp_id,
         "videoId": temp_id,
+        "video_id": temp_id,
         "videoUrl": "",
         "video_url": "",
         "url": "",
         "status": "queued",
         "progress": 0,
         "prompt": final_prompt,
+        "full_prompt": full_prompt,
         "motion_prompt": final_prompt,
-        "negative_prompt": negative_prompt,
-        "resolution": resolution,
+        "negative_prompt": neg_prompt,
+        "resolution": str(res_val),
         "aspect_ratio": aspect_ratio,
-        "orientation": orientation,
         "duration": final_duration,
+        "duration_seconds": final_duration,
         "camera_control": final_camera,
-        "platform": platform,
-        "width": width,
-        "height": height,
-        "num_frames": num_frames,
+        "platform": "wan2.1-free",
+        "model": HF_MODEL if res_val >= 720 else HF_MODEL_FAST,
         "image_path": image_path,
+        "wan_image_path": wan_image_path,
         "video_path": video_path,
-        "video_url_final": video_url
+        "video_url_final": video_url,
+        "hf_key_set": bool(hf_key)
     }
     HISTORY.append(entry)
-
+    
     def do_generation():
         try:
-            # FIX for 16:9 distortion + Download failed: Use ORIGINAL image directly
-            # Try multiple public hosts sequentially if Agnes can't fetch
-            public_urls = get_all_public_urls(image_path)
-            if not public_urls:
-                print("All public hosts failed, trying Agnes image hosting as fallback")
-                agnes_hosted = upload_image_via_agnes(image_path, agnes_key)
-                if agnes_hosted:
-                    public_urls = [agnes_hosted]
+            entry["status"] = "processing"
+            entry["progress"] = 10
+            print(f"[{temp_id}] Starting Wan 2.1: {full_prompt[:120]}")
             
-            if not public_urls:
-                raise Exception("No public image URL available")
+            if not hf_key or "PASTE_YOUR" in hf_key:
+                raise Exception("No HF API key set. Set HF_API_KEY env var on Render with your hf_xxx key")
             
-            public_image_url = public_urls[0]
-            print(f"Public image candidates: {public_urls}")
-            print(f"Trying first: {public_image_url} - should be exact first frame")
-
-            if not agnes_key:
-                print("No key, static placeholder")
-                try:
-                    import subprocess
-                    cmd = ["ffmpeg", "-y", "-loop", "1", "-i", image_path, "-c:v", "libx264", "-t", str(final_duration), "-pix_fmt", "yuv420p", "-vf", f"scale={width}:-2", video_path]
-                    subprocess.run(cmd, capture_output=True, timeout=30)
-                except:
-                    shutil.copy(image_path, video_path)
-                entry["videoUrl"] = video_url
-                entry["video_url"] = video_url
-                entry["url"] = video_url
-                entry["status"] = "completed"
-                entry["progress"] = 100
-                return
-
-            headers = {
-                "Authorization": f"Bearer {agnes_key}",
-                "Content-Type": "application/json"
-            }
-            
-            full_prompt = final_prompt
-            neg_prompt = negative_prompt
-            if final_camera == "static":
-                full_prompt = f"{final_prompt}, static camera, fixed camera position, no camera movement, locked-off shot, tripod"
-                if "camera movement" not in neg_prompt.lower():
-                    neg_prompt = (neg_prompt + ", camera movement, camera shake, panning, tilting, zooming").strip(", ")
-            elif final_camera and final_camera != "static":
-                full_prompt = f"{final_prompt}, camera {final_camera}"
-            
-            payload = {
-                "model": "agnes-video-v2.0",
-                "prompt": full_prompt,
-                "image": public_image_url,
-                "width": width,
-                "height": height,
-                "num_frames": num_frames,
-                "frame_rate": frame_rate
-            }
-            if neg_prompt:
-                payload["negative_prompt"] = neg_prompt
-
-            # Try Agnes create with retry on different image hosts if Download failed - FIXED for no response
-            resp = None
+            video_bytes = None
             last_error = None
-            for idx, img_url in enumerate(public_urls):
-                try:
-                    payload["image"] = img_url
-                    print(f"Calling Agnes create attempt {idx+1}/{len(public_urls)} with image: {img_url}")
-                    print(f"Payload: width={width} height={height} frames={num_frames}")
-                    resp = requests.post(AGNES_BASE_CREATE, headers=headers, json=payload, timeout=180)
-                    print(f"Agnes create response: {resp.status_code} {resp.text[:2000]}")
-                    
-                    if resp.status_code == 200:
-                        break  # success
-                    
-                    text = resp.text.lower()
-                    if "download image url failed" in text or "connection reset" in text or "connection aborted" in text or "fail_to_fetch" in text or "400" in text:
-                        print(f"Agnes failed to fetch {img_url}, trying next host... error: {resp.text[:500]}")
-                        last_error = resp.text
-                        # Small delay before next try
-                        time.sleep(2)
-                        continue
-                    else:
-                        # Other error, don't retry hosts
-                        last_error = resp.text
-                        break
-                except Exception as req_e:
-                    print(f"Request exception for {img_url}: {req_e}")
-                    last_error = str(req_e)
-                    time.sleep(2)
-                    continue
             
-            # FINAL FALLBACK: Try data URI if all URLs failed
-            if (resp is None or (resp.status_code != 200 and last_error and "download image url failed" in last_error.lower())):
-                print("All public URLs failed, trying data URI as last resort...")
-                try:
-                    data_uri = get_image_as_data_uri(image_path)
-                    if data_uri:
-                        payload["image"] = data_uri
-                        print(f"Trying data URI {len(data_uri)//1000}KB")
-                        resp = requests.post(AGNES_BASE_CREATE, headers=headers, json=payload, timeout=180)
-                        print(f"Data URI attempt: {resp.status_code if resp else 'no resp'} {resp.text[:2000] if resp else last_error}")
-                except Exception as uri_e:
-                    print(f"Data URI attempt exception: {uri_e}")
-                    last_error = f"{last_error} | Data URI error: {uri_e}"
-            
-            # If still no response after all retries, try ONE more time with Render URL only and longer timeout
-            if resp is None or resp.status_code != 200:
-                if "no response" in str(last_error).lower() or resp is None:
-                    print("No response after all hosts, retrying Render URL with 180s timeout...")
-                    try:
-                        render_url = public_urls[0] if public_urls else f"{base_url}/videos/{os.path.basename(image_path)}"
-                        payload["image"] = render_url
-                        resp = requests.post(AGNES_BASE_CREATE, headers=headers, json=payload, timeout=180)
-                        print(f"Render retry: {resp.status_code} {resp.text[:2000]}")
-                    except Exception as render_e:
-                        print(f"Render retry failed: {render_e}")
-                        last_error = f"{last_error} | Render retry: {render_e}"
-            
-            if resp is None or resp.status_code != 200:
-                raise Exception(f"Agnes create failed {resp.status_code if resp else 'no response'}: {resp.text if resp and hasattr(resp, 'text') else last_error}")
-            
-            data = resp.json()
-            video_id_agnes = data.get("video_id") or data.get("id") or data.get("task_id")
-            if not video_id_agnes:
-                raise Exception(f"No video_id: {data}")
-            
-            entry["agnes_video_id"] = video_id_agnes
-            entry["status"] = "in_progress"
-
-            agnes_video_url = None
-            # Polling scales with duration: 5s~90, 10s~150, 20s~250 attempts
-            if final_duration <= 5:
-                max_attempts = 90   # 450s
-            elif final_duration <= 10:
-                max_attempts = 150  # 750s
-            else:
-                max_attempts = 250  # 1250s = ~20 mins for 20s clip
-            print(f"Polling max {max_attempts} attempts for {final_duration}s video ({num_frames} frames)")
-            for attempt in range(max_attempts):
-                time.sleep(5)
-                try:
-                    poll_url = f"{AGNES_BASE_GET}?video_id={video_id_agnes}&model_name=agnes-video-v2.0"
-                    poll_resp = requests.get(poll_url, headers={"Authorization": f"Bearer {agnes_key}"}, timeout=30)
-                    print(f"Poll {attempt}: {poll_resp.text[:1000]}")
-                    
-                    if poll_resp.status_code == 200:
-                        poll_data = poll_resp.json()
-                        status = poll_data.get("status") or poll_data.get("state")
-                        progress = poll_data.get("progress", 0)
-                        entry["progress"] = progress
-                        entry["status"] = status or "in_progress"
-                        
-                        for field in ["remixed_from_video_id", "video_url", "url", "result_url", "output_url", "videoUrl"]:
-                            if field in poll_data and poll_data[field]:
-                                agnes_video_url = poll_data[field]
-                                break
-                        
-                        if not agnes_video_url:
-                            if "data" in poll_data and isinstance(poll_data["data"], dict):
-                                for field in ["remixed_from_video_id", "video_url", "url"]:
-                                    if field in poll_data["data"]:
-                                        agnes_video_url = poll_data["data"][field]
-                                        break
-                        
-                        if not agnes_video_url and status in ["completed", "success", "done", "finished"]:
-                            txt = json.dumps(poll_data)
-                            import re
-                            m = re.search(r'https://[^\s"\']+\.mp4', txt)
-                            if m:
-                                agnes_video_url = m.group(0)
-                        
-                        if agnes_video_url:
-                            print(f"Found Agnes video URL: {agnes_video_url}")
-                            break
-                        
-                        if status in ["failed", "error"]:
-                            raise Exception(f"Agnes failed: {poll_data}")
-                            
-                except Exception as e:
-                    print(f"Poll error {attempt}: {e}")
-                    continue
-            
-            if not agnes_video_url:
-                raise Exception("No video URL after polling")
-            
-            print(f"Downloading {agnes_video_url}")
             try:
-                r = requests.get(agnes_video_url, stream=True, timeout=120)
-                r.raise_for_status()
-                with open(video_path, "wb") as f:
-                    for chunk in r.iter_content(chunk_size=8192):
-                        f.write(chunk)
-                size = os.path.getsize(video_path)
-                print(f"Saved {video_path} {size} bytes")
-                if size < 10000:
-                    print(f"WARNING: File too small, might be failed download")
-            except Exception as dl_e:
-                print(f"Download failed: {dl_e}, will use Agnes direct URL as fallback")
+                from huggingface_hub import InferenceClient
+                from PIL import Image as PILImage
+                
+                print(f"[{temp_id}] Trying InferenceClient fal-ai provider...")
+                client = InferenceClient(provider="fal-ai", api_key=hf_key)
+                entry["progress"] = 20
+                
+                pil_image = PILImage.open(wan_image_path)
+                
+                result = client.image_to_video(
+                    image=pil_image,
+                    prompt=full_prompt,
+                    negative_prompt=neg_prompt,
+                    model=HF_MODEL if res_val >= 720 else HF_MODEL_FAST,
+                )
+                print(f"[{temp_id}] result type: {type(result)}")
+                
+                if isinstance(result, bytes):
+                    video_bytes = result
+                elif hasattr(result, 'read'):
+                    video_bytes = result.read()
+                else:
+                    import requests as req
+                    if isinstance(result, str) and result.startswith("http"):
+                        r = req.get(result, timeout=120)
+                        video_bytes = r.content
+                    else:
+                        video_bytes = result
+                        
+                if video_bytes and len(video_bytes) > 10000:
+                    print(f"[{temp_id}] Got video {len(video_bytes)} bytes via fal-ai")
+                else:
+                    raise Exception(f"Empty result from fal-ai: {result}")
+                    
+            except Exception as e1:
+                print(f"[{temp_id}] fal-ai failed: {e1}")
+                traceback.print_exc()
+                last_error = str(e1)
+                entry["progress"] = 30
+                
+                try:
+                    from huggingface_hub import InferenceClient
+                    from PIL import Image as PILImage
+                    print(f"[{temp_id}] Trying hf-inference provider...")
+                    client2 = InferenceClient(api_key=hf_key)
+                    pil_image = PILImage.open(wan_image_path)
+                    
+                    result = client2.image_to_video(
+                        image=pil_image,
+                        prompt=full_prompt,
+                        model=HF_MODEL,
+                    )
+                    if isinstance(result, bytes):
+                        video_bytes = result
+                    elif isinstance(result, str) and result.startswith("http"):
+                        import requests as req
+                        r = req.get(result, timeout=120)
+                        video_bytes = r.content
+                    else:
+                        video_bytes = result if isinstance(result, bytes) else None
+                        
+                except Exception as e2:
+                    print(f"[{temp_id}] hf-inference failed: {e2}")
+                    traceback.print_exc()
+                    last_error = str(e2)
+                    entry["progress"] = 40
+                    
+                    try:
+                        import requests as req
+                        print(f"[{temp_id}] Trying direct HF API...")
+                        api_url = f"https://api-inference.huggingface.co/models/{HF_MODEL}"
+                        headers = {"Authorization": f"Bearer {hf_key}"}
+                        
+                        with open(wan_image_path, "rb") as f:
+                            img_data = f.read()
+                        
+                        response = req.post(api_url, headers=headers, data=img_data, timeout=300)
+                        print(f"[{temp_id}] Direct API {response.status_code}")
+                        
+                        if response.status_code == 200 and len(response.content) > 10000:
+                            video_bytes = response.content
+                        else:
+                            raise Exception(f"Direct API failed: {response.status_code} {response.text[:1000]}")
+                            
+                    except Exception as e3:
+                        print(f"[{temp_id}] Direct API failed: {e3}")
+                        last_error = str(e3)
             
-            # Store both local and direct URLs
+            if not video_bytes or len(video_bytes) < 10000:
+                raise Exception(f"All HF methods failed. Last error: {last_error}. Check HF token has Inference permission.")
+            
+            with open(video_path, "wb") as f:
+                f.write(video_bytes)
+            
+            size = os.path.getsize(video_path)
+            print(f"[{temp_id}] Saved {video_path} {size} bytes")
+            
+            if size < 10000:
+                raise Exception(f"Video too small {size} bytes")
+            
             entry["videoUrl"] = video_url
             entry["video_url"] = video_url
             entry["url"] = video_url
-            entry["agnes_direct_url"] = agnes_video_url
-            entry["direct_url"] = agnes_video_url
             entry["status"] = "completed"
             entry["progress"] = 100
-            print(f"Completed entry: local {video_url} direct {agnes_video_url}")
+            print(f"[{temp_id}] Completed: {video_url}")
             
         except Exception as e:
-            import traceback
-            print(f"BG failed: {e}")
-            print(traceback.format_exc())
+            print(f"[{temp_id}] Failed: {e}")
+            traceback.print_exc()
             entry["status"] = "failed"
             entry["error"] = str(e)
-            # Only create static placeholder if NO key (expected behavior)
-            # If key exists but Agnes failed, DON'T create static - show failed so user knows
-            if not agnes_key:
-                try:
-                    import subprocess
-                    cmd = ["ffmpeg", "-y", "-loop", "1", "-i", image_path, "-c:v", "libx264", "-t", str(final_duration), "-pix_fmt", "yuv420p", "-vf", f"scale={width}:-2", video_path]
-                    subprocess.run(cmd, capture_output=True, timeout=30)
-                    if not os.path.exists(video_path):
-                        shutil.copy(image_path, video_path)
-                    entry["videoUrl"] = video_url
-                    entry["video_url"] = video_url
-                    entry["url"] = video_url
-                    entry["status"] = "completed"
-                except:
-                    pass
-            else:
-                print("Agnes failed but key exists - NOT creating static fallback, returning failed status")
-                # Leave videoUrl empty so APK shows error not static video
-
+            entry["progress"] = 0
+    
     import threading
     threading.Thread(target=do_generation, daemon=True).start()
-
+    
     return {
         "id": temp_id,
         "videoId": temp_id,
         "video_id": temp_id,
         "status": "queued",
-        "message": "Generation started, poll /status/{id}",
+        "message": f"Wan 2.1 generation started - cinematic {res_val}p, {final_duration}s - poll /status/{temp_id}",
         "videoUrl": None,
         "video_url": None,
         "url": None,
-        "poll_url": f"/status/{temp_id}"
+        "poll_url": f"/status/{temp_id}",
+        "model": HF_MODEL,
+        "free": True
     }
 
 @app.get("/status/{video_id}")
 async def get_status(video_id: str):
     for entry in reversed(HISTORY):
         if entry["id"] == video_id or entry.get("videoId") == video_id:
-            # If local file missing, return direct Agnes URL as fallback
-            video_path = entry.get("video_path")
-            if video_path and not os.path.exists(video_path):
-                print(f"Local file missing {video_path}, returning direct URL")
-                if entry.get("agnes_direct_url"):
-                    entry["videoUrl"] = entry["agnes_direct_url"]
-                    entry["video_url"] = entry["agnes_direct_url"]
             return entry
     return {"error": "not found", "id": video_id}
 
