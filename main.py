@@ -13,7 +13,7 @@ import json
 import time
 import requests
 
-from fastapi import FastAPI, File, UploadFile, Form
+from fastapi import FastAPI, File, UploadFile, Form, Header
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -33,11 +33,105 @@ app.mount("/videos", StaticFiles(directory="videos"), name="videos")
 
 HISTORY = []
 
+# ===== PERMANENT KEY - PASTE YOUR KEY HERE =====
+HARDCODED_AGNES_KEY = "PASTE_YOUR_AGNES_KEY_HERE"  # e.g. "sk_..." 
+# ===============================================
+
 AGNES_BASE_CREATE = "https://apihub.agnes-ai.com/v1/videos"
 AGNES_BASE_GET = "https://apihub.agnes-ai.com/agnesapi"
 
-def get_agnes_key():
-    return os.getenv("AGNES_API_KEY") or os.getenv("AGNES_KEY") or ""
+def upload_image_via_agnes(image_path: str, api_key: str) -> str:
+    """Upload local image to Agnes Image API to get hosted URL that Video API can fetch"""
+    import base64
+    try:
+        with open(image_path, 'rb') as f:
+            b64 = base64.b64encode(f.read()).decode('utf-8')
+        # Detect mime
+        ext = image_path.split('.')[-1].lower()
+        mime = 'image/jpeg' if ext in ['jpg','jpeg'] else 'image/png' if ext == 'png' else 'image/webp'
+        data_uri = f"data:{mime};base64,{b64}"
+        print(f"Uploading image to Agnes Image API as data URI, size {len(data_uri)//1000}KB")
+        
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json"
+        }
+        # Use image-to-image to get hosted URL - keep same image
+        # IMPORTANT: extra_body.image must be ARRAY per docs
+        payload = {
+            "model": "agnes-image-2.1-flash",
+            "prompt": "keep exactly same image, no changes, preserve original composition, high quality",
+            "size": "1024x768",
+            "extra_body": {
+                "image": [data_uri],
+                "response_format": "url"
+            }
+        }
+        r = requests.post("https://apihub.agnes-ai.com/v1/images/generations", headers=headers, json=payload, timeout=120)
+        print(f"Agnes Image upload response: {r.status_code} {r.text[:2000]}")
+        if r.status_code == 200:
+            data = r.json()
+            # Try various fields
+            if 'data' in data and len(data['data']) > 0:
+                url = data['data'][0].get('url')
+                if url:
+                    print(f"Agnes hosted image URL: {url}")
+                    return url
+            # Sometimes url at top level
+            if 'url' in data:
+                return data['url']
+    except Exception as e:
+        import traceback
+        print(f"Agnes image upload failed: {e}")
+        print(traceback.format_exc())
+    return None
+
+def upload_image_public(image_path: str, api_key: str = "") -> str:
+    """Fallback: Upload image to catbox.moe for Agnes to fetch quickly"""
+    try:
+        # Try catbox.moe first - fastest
+        with open(image_path, 'rb') as f:
+            files = {'fileToUpload': f}
+            data = {'reqtype': 'fileupload'}
+            r = requests.post('https://catbox.moe/user/api.php', data=data, files=files, timeout=30)
+            if r.status_code == 200 and r.text.startswith('https://'):
+                url = r.text.strip()
+                print(f"Catbox upload OK: {url}")
+                return url
+            print(f"Catbox failed: {r.status_code} {r.text[:200]}")
+    except Exception as e:
+        print(f"Catbox upload error: {e}")
+    
+    try:
+        # Fallback: tmpfiles.org
+        with open(image_path, 'rb') as f:
+            files = {'file': f}
+            r = requests.post('https://tmpfiles.org/api/v1/upload', files=files, timeout=30)
+            if r.status_code == 200:
+                data = r.json()
+                url = data.get('data', {}).get('url', '')
+                if url:
+                    # Convert https://tmpfiles.org/dl/xxx to https://tmpfiles.org/dl/xxx direct
+                    # Actually need direct download link: replace /dl/ with direct? tmpfiles gives page, but we need direct
+                    # Use the url and replace to get direct
+                    direct = url.replace('tmpfiles.org/', 'tmpfiles.org/dl/')
+                    print(f"Tmpfiles upload OK: {direct}")
+                    return direct
+    except Exception as e:
+        print(f"Tmpfiles upload error: {e}")
+
+    # Last fallback: use Render URL (will likely timeout but try)
+    base_url = os.getenv("RENDER_EXTERNAL_URL") or "https://appimgvid-backend2026.onrender.com"
+    filename = os.path.basename(image_path)
+    fallback = f"{base_url}/videos/{filename}"
+    print(f"Using fallback Render URL: {fallback}")
+    return fallback
+
+
+
+def get_agnes_key(header_key: str = ""):
+    # 1. Header from APK, 2. Render Env Var, 3. Hardcoded in code
+    return header_key or os.getenv("AGNES_API_KEY") or os.getenv("AGNES_KEY") or HARDCODED_AGNES_KEY or ""
 
 @app.get("/")
 async def root():
@@ -68,7 +162,9 @@ async def generate(
     duration_seconds: int = Form(None),
     camera_control: str = Form("static"),
     camera_json: str = Form(None),
-    platform: str = Form("agnes")
+    platform: str = Form("agnes"),
+    x_api_key: str = Header(None, alias="X-API-Key"),
+    authorization: str = Header(None)
 ):
     final_prompt = motion_prompt or prompt or ""
     final_duration = duration_seconds if duration_seconds is not None else duration
@@ -104,18 +200,33 @@ async def generate(
     with open(image_path, "wb") as buffer:
         shutil.copyfileobj(image.file, buffer)
     
-    # Public URL for Agnes to fetch image
-    # NOTE: Render URL must be public
     base_url = os.getenv("RENDER_EXTERNAL_URL") or "https://appimgvid-backend2026.onrender.com"
-    public_image_url = f"{base_url}/videos/{image_filename}"
+    # Upload to fast public host for Agnes
+    # Try Agnes hosted upload first (most reliable for video API)
+    agnes_hosted = upload_image_via_agnes(image_path, agnes_key)
+    if agnes_hosted:
+        public_image_url = agnes_hosted
+    else:
+        public_image_url = upload_image_public(image_path, agnes_key)
+    print(f"Public image for Agnes: {public_image_url}")
 
     print(f"[GENERATE] id={temp_id} prompt={final_prompt[:200]} {width}x{height} frames={num_frames} image_url={public_image_url}")
 
-    agnes_key = get_agnes_key()
+    # Try header from APK first, then env var
+    header_key = ""
+    if x_api_key:
+        header_key = x_api_key
+    elif authorization and "Bearer " in authorization:
+        header_key = authorization.replace("Bearer ", "").strip()
+    elif authorization:
+        header_key = authorization.strip()
+    agnes_key = get_agnes_key(header_key)
+    print(f"Key source: header={bool(header_key)} env={bool(os.getenv('AGNES_API_KEY'))} final_len={len(agnes_key)}")
     video_filename = f"{temp_id}.mp4"
     video_path = f"videos/{video_filename}"
     video_url = f"{base_url}/videos/{video_filename}"
 
+    print(f"DEBUG: agnes_key length={len(agnes_key)} starts_with={agnes_key[:10] if agnes_key else 'EMPTY'}")
     if not agnes_key:
         print("No AGNES_API_KEY set, creating static placeholder")
         try:
@@ -153,7 +264,7 @@ async def generate(
             print(f"Calling Agnes create: {AGNES_BASE_CREATE} payload={json.dumps(payload)[:500]}")
             
             resp = requests.post(AGNES_BASE_CREATE, headers=headers, json=payload, timeout=120)
-            print(f"Agnes create response: {resp.status_code} {resp.text[:1000]}")
+            print(f"Agnes create response: {resp.status_code} {resp.text[:2000]}")
             
             if resp.status_code != 200:
                 raise Exception(f"Agnes create failed {resp.status_code}: {resp.text}")
@@ -181,8 +292,8 @@ async def generate(
                         status = poll_data.get("status") or poll_data.get("state")
                         progress = poll_data.get("progress", 0)
                         
-                        # Try to find video URL
-                        possible_url_fields = ["video_url", "url", "result_url", "output_url", "videoUrl"]
+                        # Try to find video URL - per docs field is remixed_from_video_id or url
+                        possible_url_fields = ["remixed_from_video_id", "video_url", "url", "result_url", "output_url", "videoUrl"]
                         for field in possible_url_fields:
                             if field in poll_data and poll_data[field]:
                                 agnes_video_url = poll_data[field]
@@ -235,7 +346,9 @@ async def generate(
             print(f"Saved Agnes video to {video_path}, size {os.path.getsize(video_path)} bytes")
             
         except Exception as e:
+            import traceback
             print(f"Agnes generation failed: {e}")
+            print(traceback.format_exc())
             # Fallback to static if Agnes fails, so APK still gets a file
             try:
                 import subprocess
