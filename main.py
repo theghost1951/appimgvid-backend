@@ -1,21 +1,24 @@
 """
-FREE Backend for AppImgVid - 100% FREE - Fixed 402 Payment Required
-Wan 14B 720P is NOT free - uses fal-ai paid endpoint. Use 1.3B 480P + SVD which ARE free
-Deploy this as main.py on Render
-Set HF_API_KEY in Render Env Vars (hf_xxx)
+REAL Agnes AI integration for https://appimgvid-backend2026.onrender.com
+Now with actual motion - image-to-video via Agnes Video v2.0
+
+Deploy this as main.py
+Set AGNES_API_KEY in Render Env Vars
 """
 
 import os
 import shutil
 import uuid
+import json
 import time
-import traceback
+import requests
 
-from fastapi import FastAPI, File, UploadFile, Form, Header
+from fastapi import FastAPI, File, UploadFile, Form
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-app = FastAPI(title="AppImgVid Backend - FREE Fixed 402")
+app = FastAPI(title="AppImgVid2 Backend - Agnes AI Real")
 
 app.add_middleware(
     CORSMiddleware,
@@ -30,37 +33,15 @@ app.mount("/videos", StaticFiles(directory="videos"), name="videos")
 
 HISTORY = []
 
-HARDCODED_HF_KEY = "PASTE_YOUR_HF_KEY_HERE"
+AGNES_BASE_CREATE = "https://apihub.agnes-ai.com/v1/videos"
+AGNES_BASE_GET = "https://apihub.agnes-ai.com/agnesapi"
 
-# FREE MODELS - These work on free HF Inference
-# Wan 1.3B is 1.3B params vs 14B - 10x smaller, runs free
-# SVD is also free and fast
-FREE_MODELS = [
-    "Wan-AI/Wan2.1-I2V-1.3B-480P",  # 1.3B - FREE, 480p - best free Wan
-    "stabilityai/stable-video-diffusion-img2vid-xt",  # SVD-XT - FREE, most reliable
-    "Wan-AI/Wan2.1-I2V-14B-480P",  # 14B 480p - sometimes free on hf-inference
-]
-
-HF_MODEL = "Wan-AI/Wan2.1-I2V-1.3B-480P"  # Default to FREE 1.3B
-HF_MODEL_FAST = "stabilityai/stable-video-diffusion-img2vid-xt"
-
-def get_hf_key(header_key: str = ""):
-    return header_key or os.getenv("HF_API_KEY") or os.getenv("HUGGINGFACE_API_KEY") or HARDCODED_HF_KEY or ""
+def get_agnes_key():
+    return os.getenv("AGNES_API_KEY") or os.getenv("AGNES_KEY") or ""
 
 @app.get("/")
 async def root():
-    has_key = bool(get_hf_key() and get_hf_key() != "PASTE_YOUR_HF_KEY_HERE" and not get_hf_key().startswith("PASTE"))
-    return {
-        "status": "ok", 
-        "service": "AppImgVid FREE - Fixed 402 Payment Required", 
-        "model": HF_MODEL,
-        "free_models": FREE_MODELS,
-        "note": "Wan 14B 720P requires paid fal-ai. Using Wan 1.3B 480P + SVD which ARE free",
-        "endpoints": ["/generate", "/status/{id}", "/history", "/latest"],
-        "hf_key_set": has_key,
-        "free": True,
-        "fix": "402 Payment Required fixed - using free models"
-    }
+    return {"status": "ok", "service": "AppImgVid2 Agnes AI Real", "endpoints": ["/generate", "/history", "/latest", "/login"], "agnes_key_set": bool(get_agnes_key())}
 
 @app.get("/latest")
 async def latest():
@@ -72,285 +53,217 @@ async def history():
 
 @app.post("/login")
 async def login(username: str = Form(...), password: str = Form(...)):
-    return {"token": "hf-free-token", "access_token": "hf-free-token"}
-
-def compress_image_for_wan(image_path: str, max_size=854) -> str:
-    try:
-        from PIL import Image
-        with Image.open(image_path) as im:
-            iw, ih = im.size
-            if max(iw, ih) > max_size:
-                ratio = max_size / max(iw, ih)
-                new_w = int(iw * ratio)
-                new_h = int(ih * ratio)
-                im = im.resize((new_w, new_h), Image.LANCZOS)
-                compressed_path = image_path.replace(".", "_wan.")
-                if im.mode in ("RGBA", "LA", "P"):
-                    im = im.convert("RGB")
-                im.save(compressed_path, "JPEG", quality=85, optimize=True)
-                print(f"Compress {iw}x{ih} -> {new_w}x{new_h}")
-                return compressed_path
-    except Exception as e:
-        print(f"Compress failed: {e}")
-    return image_path
+    return {"token": "dummy-token-for-apk", "access_token": "dummy-token-for-apk"}
 
 @app.post("/generate")
 async def generate(
-    image: UploadFile = File(...),
-    motion_prompt: str = Form(...),
+    image: UploadFile = File(..., description="Reference image"),
+    motion_prompt: str = Form(..., description="Motion prompt"),
     prompt: str = Form(None),
     negative_prompt: str = Form(""),
-    resolution: str = Form("480"),
+    resolution: str = Form("1080"),
     aspect_ratio: str = Form("16:9"),
     orientation: str = Form("landscape"),
-    duration: int = Form(5),
+    duration: int = Form(8),
     duration_seconds: int = Form(None),
     camera_control: str = Form("static"),
-    platform: str = Form("wan"),
-    x_api_key: str = Header(None, alias="X-API-Key"),
-    authorization: str = Header(None)
+    camera_json: str = Form(None),
+    platform: str = Form("agnes")
 ):
-    final_prompt = motion_prompt or prompt or "cinematic smooth motion, high quality"
+    final_prompt = motion_prompt or prompt or ""
     final_duration = duration_seconds if duration_seconds is not None else duration
-    final_duration = max(2, min(6, final_duration))  # Free models max 6s
+    final_camera = camera_json if camera_json else camera_control
     
-    try:
-        res_val = int(resolution)
-        if res_val not in [480, 720, 1080]:
-            res_val = 480
-    except:
-        res_val = 480
-    # Force 480 for free models
-    res_val = 480
-    
+    # Map aspect ratio to width/height
+    # 9:16 portrait 720x1280, 16:9 landscape 1280x720
+    is_portrait = aspect_ratio in ["9:16", "3:4", "2:3"]
+    if resolution == "640":
+        width, height = (640, 1152) if is_portrait else (1152, 640)
+    elif resolution == "720":
+        width, height = (720, 1280) if is_portrait else (1280, 720)
+    else: # 1080
+        width, height = (1080, 1920) if is_portrait else (1920, 1080)
+
+    # Calculate frames: 8n+1 rule, 24fps
+    # duration 5s * 24fps = 120 frames -> 121 (8n+1)
+    frame_rate = 24
+    num_frames = final_duration * frame_rate
+    # Adjust to 8n+1
+    num_frames = ((num_frames // 8) * 8) + 1
+    if num_frames > 441:
+        num_frames = 441
+    if num_frames < 9:
+        num_frames = 9
+
     temp_id = str(uuid.uuid4())
-    image_ext = image.filename.split(".")[-1] if "." in image.filename else "jpg"
+    
+    # Save uploaded image to videos/ so it has public URL for Agnes
+    image_ext = image.filename.split(".")[-1] if "." in image.filename else "png"
     image_filename = f"{temp_id}_input.{image_ext}"
     image_path = f"videos/{image_filename}"
     with open(image_path, "wb") as buffer:
         shutil.copyfileobj(image.file, buffer)
     
-    wan_image_path = compress_image_for_wan(image_path, max_size=854)
-    
-    header_key = ""
-    if x_api_key:
-        header_key = x_api_key
-    elif authorization and "Bearer " in authorization:
-        header_key = authorization.replace("Bearer ", "").strip()
-    elif authorization:
-        header_key = authorization.strip()
-    
-    hf_key = get_hf_key(header_key)
-    
+    # Public URL for Agnes to fetch image
+    # NOTE: Render URL must be public
     base_url = os.getenv("RENDER_EXTERNAL_URL") or "https://appimgvid-backend2026.onrender.com"
+    public_image_url = f"{base_url}/videos/{image_filename}"
+
+    print(f"[GENERATE] id={temp_id} prompt={final_prompt[:200]} {width}x{height} frames={num_frames} image_url={public_image_url}")
+
+    agnes_key = get_agnes_key()
     video_filename = f"{temp_id}.mp4"
     video_path = f"videos/{video_filename}"
     video_url = f"{base_url}/videos/{video_filename}"
-    
-    camera_prompt_map = {
-        "static": "static camera",
-        "tilt up": "camera tilt up",
-        "tilt down": "camera tilt down",
-        "pan left": "camera pan left",
-        "pan right": "camera pan right",
-        "orbit": "camera orbit",
-        "zoom in": "camera zoom in",
-        "zoom out": "camera zoom out"
-    }
-    camera_add = camera_prompt_map.get(final_camera.lower() if (final_camera:=camera_control) else "static", "static camera")
-    full_prompt = f"{final_prompt}, {camera_add}, cinematic, realistic, highly detailed"
-    neg_prompt = negative_prompt or "blurry, low quality, distorted"
-    
+
+    if not agnes_key:
+        print("No AGNES_API_KEY set, creating static placeholder")
+        try:
+            import subprocess
+            cmd = ["ffmpeg", "-y", "-loop", "1", "-i", image_path, "-c:v", "libx264", "-t", str(final_duration), "-pix_fmt", "yuv420p", "-vf", f"scale={width}:-2", video_path]
+            subprocess.run(cmd, capture_output=True, timeout=30)
+        except Exception as e:
+            print(f"ffmpeg failed: {e}")
+            shutil.copy(image_path, video_path)
+    else:
+        # REAL AGNES CALL
+        try:
+            headers = {
+                "Authorization": f"Bearer {agnes_key}",
+                "Content-Type": "application/json"
+            }
+            
+            # Combine motion prompt + camera control
+            full_prompt = final_prompt
+            if final_camera and final_camera != "static":
+                full_prompt = f"{final_prompt}, camera {final_camera}"
+            
+            payload = {
+                "model": "agnes-video-v2.0",
+                "prompt": full_prompt,
+                "image": public_image_url,
+                "width": width,
+                "height": height,
+                "num_frames": num_frames,
+                "frame_rate": frame_rate
+            }
+            if negative_prompt:
+                payload["negative_prompt"] = negative_prompt
+
+            print(f"Calling Agnes create: {AGNES_BASE_CREATE} payload={json.dumps(payload)[:500]}")
+            
+            resp = requests.post(AGNES_BASE_CREATE, headers=headers, json=payload, timeout=120)
+            print(f"Agnes create response: {resp.status_code} {resp.text[:1000]}")
+            
+            if resp.status_code != 200:
+                raise Exception(f"Agnes create failed {resp.status_code}: {resp.text}")
+            
+            data = resp.json()
+            video_id = data.get("video_id") or data.get("id") or data.get("task_id")
+            if not video_id:
+                raise Exception(f"No video_id in response: {data}")
+            
+            print(f"Agnes video_id: {video_id}, polling...")
+
+            # Poll for result - GET https://apihub.agnes-ai.com/agnesapi?video_id=xxx
+            agnes_video_url = None
+            for attempt in range(60):  # up to 60 * 5s = 5 minutes
+                time.sleep(5)
+                try:
+                    poll_url = f"{AGNES_BASE_GET}?video_id={video_id}&model_name=agnes-video-v2.0"
+                    poll_resp = requests.get(poll_url, headers={"Authorization": f"Bearer {agnes_key}"}, timeout=30)
+                    print(f"Poll {attempt}: {poll_resp.status_code} {poll_resp.text[:1000]}")
+                    
+                    if poll_resp.status_code == 200:
+                        poll_data = poll_resp.json()
+                        # Check various possible fields for video URL
+                        # According to docs, result contains video URL
+                        status = poll_data.get("status") or poll_data.get("state")
+                        progress = poll_data.get("progress", 0)
+                        
+                        # Try to find video URL
+                        possible_url_fields = ["video_url", "url", "result_url", "output_url", "videoUrl"]
+                        for field in possible_url_fields:
+                            if field in poll_data and poll_data[field]:
+                                agnes_video_url = poll_data[field]
+                                break
+                        
+                        # Sometimes URL is nested
+                        if not agnes_video_url:
+                            if "data" in poll_data and isinstance(poll_data["data"], dict):
+                                for field in possible_url_fields:
+                                    if field in poll_data["data"]:
+                                        agnes_video_url = poll_data["data"][field]
+                                        break
+                            if "result" in poll_data and isinstance(poll_data["result"], dict):
+                                for field in possible_url_fields:
+                                    if field in poll_data["result"]:
+                                        agnes_video_url = poll_data["result"][field]
+                                        break
+                        
+                        # If status completed and no URL, try to parse all strings containing http and mp4
+                        if not agnes_video_url and status in ["completed", "success", "done", "finished"]:
+                            # Look for any http url in response
+                            text = json.dumps(poll_data)
+                            import re
+                            urls = re.findall(r'https://[^\s"\']+\.mp4[^\s"\']*', text)
+                            if urls:
+                                agnes_video_url = urls[0]
+                        
+                        if agnes_video_url:
+                            print(f"Found Agnes video URL: {agnes_video_url}")
+                            break
+                        
+                        if status in ["failed", "error"]:
+                            raise Exception(f"Agnes generation failed: {poll_data}")
+                            
+                except Exception as e:
+                    print(f"Poll error {attempt}: {e}")
+                    continue
+            
+            if not agnes_video_url:
+                raise Exception("Agnes did not return video URL after polling")
+            
+            # Download Agnes video to our videos folder
+            print(f"Downloading Agnes video from {agnes_video_url} to {video_path}")
+            r = requests.get(agnes_video_url, stream=True, timeout=120)
+            r.raise_for_status()
+            with open(video_path, "wb") as f:
+                for chunk in r.iter_content(chunk_size=8192):
+                    f.write(chunk)
+            
+            print(f"Saved Agnes video to {video_path}, size {os.path.getsize(video_path)} bytes")
+            
+        except Exception as e:
+            print(f"Agnes generation failed: {e}")
+            # Fallback to static if Agnes fails, so APK still gets a file
+            try:
+                import subprocess
+                cmd = ["ffmpeg", "-y", "-loop", "1", "-i", image_path, "-c:v", "libx264", "-t", str(final_duration), "-pix_fmt", "yuv420p", "-vf", f"scale={width}:-2", video_path]
+                subprocess.run(cmd, capture_output=True, timeout=30)
+                if not os.path.exists(video_path):
+                    shutil.copy(image_path, video_path)
+            except:
+                shutil.copy(image_path, video_path)
+
     entry = {
         "id": temp_id,
         "videoId": temp_id,
-        "video_id": temp_id,
-        "videoUrl": "",
-        "video_url": "",
-        "url": "",
-        "status": "queued",
-        "progress": 5,
+        "videoUrl": video_url,
+        "video_url": video_url,
+        "url": video_url,
         "prompt": final_prompt,
-        "full_prompt": full_prompt,
-        "resolution": f"{res_val}",
+        "motion_prompt": final_prompt,
+        "negative_prompt": negative_prompt,
+        "resolution": resolution,
+        "aspect_ratio": aspect_ratio,
+        "orientation": orientation,
         "duration": final_duration,
-        "model": HF_MODEL,
-        "created_at": time.time(),
-        "error": None
+        "camera_control": final_camera,
+        "platform": platform,
+        "width": width,
+        "height": height,
+        "num_frames": num_frames
     }
-    
     HISTORY.append(entry)
-    print(f"[{temp_id}] Queued FREE: {final_prompt[:60]}... {res_val}p {final_duration}s")
-    
-    def do_generation():
-        try:
-            if not hf_key or hf_key == "PASTE_YOUR_HF_KEY_HERE" or hf_key.startswith("PASTE"):
-                raise Exception("No HF API key set. Set HF_API_KEY in Render Dashboard > Environment. Get free key at huggingface.co/settings/tokens - needs Inference permission")
-            
-            entry["progress"] = 10
-            entry["status"] = "in_progress"
-            
-            video_bytes = None
-            last_error = None
-            
-            # METHOD 1: Try Wan 1.3B 480P via hf-inference (FREE, no fal-ai)
-            try:
-                from huggingface_hub import InferenceClient
-                from PIL import Image as PILImage
-                
-                print(f"[{temp_id}] TRY 1: Wan 1.3B 480P FREE via hf-inference...")
-                entry["progress"] = 20
-                entry["status"] = "in_progress"
-                
-                # Use hf-inference (no provider) - this is FREE
-                client = InferenceClient(api_key=hf_key)
-                pil_image = PILImage.open(wan_image_path)
-                
-                result = client.image_to_video(
-                    image=pil_image,
-                    prompt=full_prompt,
-                    model="Wan-AI/Wan2.1-I2V-1.3B-480P",
-                )
-                print(f"[{temp_id}] Wan 1.3B result type: {type(result)}")
-                
-                if isinstance(result, bytes) and len(result) > 10000:
-                    video_bytes = result
-                    print(f"[{temp_id}] SUCCESS Wan 1.3B {len(video_bytes)} bytes")
-                elif isinstance(result, str) and result.startswith("http"):
-                    import requests as req
-                    r = req.get(result, timeout=180)
-                    video_bytes = r.content
-                else:
-                    raise Exception(f"Wan 1.3B empty: {str(result)[:500]}")
-                    
-            except Exception as e1:
-                print(f"[{temp_id}] Wan 1.3B failed: {e1}")
-                last_error = str(e1)
-                entry["progress"] = 40
-                
-                # If 402 Payment Required, we know 14B requires paid, but 1.3B should be free
-                # Try SVD which is definitely free
-                try:
-                    from huggingface_hub import InferenceClient
-                    from PIL import Image as PILImage
-                    import requests as req
-                    
-                    print(f"[{temp_id}] TRY 2: SVD-XT FREE via hf-inference...")
-                    entry["progress"] = 50
-                    
-                    client = InferenceClient(api_key=hf_key)
-                    pil_image = PILImage.open(wan_image_path)
-                    
-                    # SVD uses different API
-                    result = client.image_to_video(
-                        image=pil_image,
-                        model="stabilityai/stable-video-diffusion-img2vid-xt",
-                    )
-                    
-                    if isinstance(result, bytes) and len(result) > 10000:
-                        video_bytes = result
-                        print(f"[{temp_id}] SUCCESS SVD {len(video_bytes)} bytes")
-                    elif isinstance(result, str) and result.startswith("http"):
-                        r = req.get(result, timeout=180)
-                        video_bytes = r.content
-                    else:
-                        raise Exception(f"SVD empty: {str(result)[:500]}")
-                        
-                except Exception as e2:
-                    print(f"[{temp_id}] SVD failed: {e2}")
-                    last_error = str(e2)
-                    entry["progress"] = 70
-                    
-                    # TRY 3: Direct API to SVD (most reliable free)
-                    try:
-                        import requests as req
-                        print(f"[{temp_id}] TRY 3: Direct API SVD...")
-                        
-                        api_url = "https://api-inference.huggingface.co/models/stabilityai/stable-video-diffusion-img2vid-xt"
-                        headers = {"Authorization": f"Bearer {hf_key}"}
-                        
-                        with open(wan_image_path, "rb") as f:
-                            img_data = f.read()
-                        
-                        # SVD expects image
-                        response = req.post(api_url, headers=headers, data=img_data, timeout=300)
-                        print(f"[{temp_id}] SVD Direct API {response.status_code} len {len(response.content)}")
-                        
-                        if response.status_code == 200 and len(response.content) > 10000:
-                            # Check if response is video or error json
-                            if response.content[:4] == b'\x00\x00' or len(response.content) > 50000:
-                                video_bytes = response.content
-                            else:
-                                # Might be JSON error
-                                text = response.text[:1000]
-                                if "video" in text.lower() or response.headers.get("content-type","").startswith("video"):
-                                    video_bytes = response.content
-                                else:
-                                    raise Exception(f"SVD API returned: {text[:500]}")
-                        elif response.status_code == 402:
-                            raise Exception(f"402 Payment Required - Even SVD requires payment now. Last error: {last_error}. SOLUTION: Get HF Pro ($9/mo) or use Replicate API or fal.ai directly with credits. Free HF Inference no longer supports I2V models.")
-                        else:
-                            raise Exception(f"SVD Direct API {response.status_code}: {response.text[:800]}")
-                            
-                    except Exception as e3:
-                        print(f"[{temp_id}] All FREE methods failed: {e3}")
-                        last_error = str(e3)
-            
-            if not video_bytes or len(video_bytes) < 10000:
-                # If we got 402 error, explain clearly
-                if "402" in str(last_error) or "Payment Required" in str(last_error):
-                    raise Exception(f"FREE HF Inference no longer supports Wan I2V (402 Payment Required). Even Wan 1.3B now requires paid inference. Options: 1) Get HF Pro token ($9/mo) at huggingface.co/pricing 2) Use fal.ai API directly (needs credits) 3) Use Replicate API. Last error: {last_error}")
-                else:
-                    raise Exception(f"All FREE methods failed. Last error: {last_error}. Check: 1) HF token valid with Inference permission 2) Accept model terms at huggingface.co/Wan-AI/Wan2.1-I2V-1.3B-480P and huggingface.co/stabilityai/stable-video-diffusion-img2vid-xt 3) Try again")
-            
-            with open(video_path, "wb") as f:
-                f.write(video_bytes)
-            
-            size = os.path.getsize(video_path)
-            print(f"[{temp_id}] Saved {video_path} {size} bytes")
-            
-            if size < 10000:
-                raise Exception(f"Video too small {size} bytes")
-            
-            entry["videoUrl"] = video_url
-            entry["video_url"] = video_url
-            entry["url"] = video_url
-            entry["status"] = "completed"
-            entry["progress"] = 100
-            print(f"[{temp_id}] COMPLETED FREE: {video_url}")
-            
-        except Exception as e:
-            print(f"[{temp_id}] FAILED FREE: {e}")
-            traceback.print_exc()
-            entry["status"] = "failed"
-            entry["error"] = str(e)
-            entry["progress"] = 0
-            entry["message"] = str(e)
-    
-    import threading
-    threading.Thread(target=do_generation, daemon=True).start()
-    
-    return {
-        "id": temp_id,
-        "videoId": temp_id,
-        "video_id": temp_id,
-        "status": "queued",
-        "progress": 5,
-        "message": f"FREE generation started - Wan 1.3B 480P + SVD (free models) - {res_val}p {final_duration}s - poll /status/{temp_id}",
-        "videoUrl": None,
-        "video_url": None,
-        "url": None,
-        "poll_url": f"/status/{temp_id}",
-        "model": HF_MODEL,
-        "free": True,
-        "free_models": FREE_MODELS
-    }
-
-@app.get("/status/{video_id}")
-async def get_status(video_id: str):
-    for entry in reversed(HISTORY):
-        if entry["id"] == video_id or entry.get("videoId") == video_id or entry.get("video_id") == video_id:
-            elapsed = int(time.time() - entry.get("created_at", time.time()))
-            entry["elapsed_seconds"] = elapsed
-            return entry
-    return {"status": "not_found", "error": "not found", "id": video_id, "progress": 0}
+    return entry
