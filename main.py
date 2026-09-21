@@ -1,6 +1,6 @@
 """
 FREE Wan 2.1 Backend for AppImgVid - 100% FREE with Hugging Face API Key
-Replaces Agnes AI - Much more cinematic & realistic
+Wan 2.1 FREE backend - Much more cinematic & realistic
 
 Deploy this as main.py on Render
 Set HF_API_KEY in Render Env Vars (hf_xxx)
