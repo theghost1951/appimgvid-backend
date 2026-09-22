@@ -1,16 +1,4 @@
 
-"""
-AppImgVid-backend2026 - Wan 2.1 1.3B I2V - 100% FREE - CORRUPTION + DOWNLOAD FIX
-Fixes from your video:
-- Gray dots + colored lines = cv2.VideoWriter mp4v corruption on Render headless
-  -> Now uses imageio-ffmpeg libx264 (always valid MP4)
-- Download button fails because file was corrupted + no Content-Disposition
-  -> Now serves with proper headers + /api/download endpoint
-- No motion = tiny 1.2% zoom -> Now 8% visible zoom + effects
-
-100% FREE, no keys, Python 3.14
-"""
-
 import os, uuid, shutil, logging, math
 from pathlib import Path
 from typing import Optional
@@ -20,24 +8,18 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
 logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("wan13b-final-fix")
+logger = logging.getLogger("app2vid-final")
 
-app = FastAPI(title="AppImgVid-backend2026 Wan 2.1 1.3B FINAL FIX", version="10.0.0")
+app = FastAPI(title="AppImgVid-backend2026", version="12.0.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
-BASE = Path("/tmp/wan13b_final")
+BASE = Path("/tmp/app2vid")
 UPLOAD_DIR = BASE / "uploads"
 VIDEO_DIR = BASE / "videos"
 for d in [UPLOAD_DIR, VIDEO_DIR]:
     d.mkdir(parents=True, exist_ok=True)
 
 app.mount("/videos", StaticFiles(directory=str(VIDEO_DIR)), name="videos")
-
-FREE_13B_SPACES = [
-    "WanVideo/Wan2.1-I2V-1.3B-480P",
-    "WanVideo/Wan2.1-I2V-14B-480P",
-    "multimodalart/wan2-1",
-]
 
 def get_output_size(ref_path: Path, res_str: str):
     from PIL import Image
@@ -51,8 +33,8 @@ def get_output_size(ref_path: Path, res_str: str):
     else:
         out_w = target
         out_h = int(out_w / aspect)
-    out_w = max(64, out_w //2*2)
-    out_h = max(64, out_h //2*2)
+    out_w = max(64, out_w // 2 * 2)
+    out_h = max(64, out_h // 2 * 2)
     max_side = 864
     if max(out_w, out_h) > max_side:
         scale = max_side / max(out_w, out_h)
@@ -60,18 +42,14 @@ def get_output_size(ref_path: Path, res_str: str):
         out_h = max(64, int(out_h * scale)//2*2)
     return out_w, out_h, w, h, aspect
 
-def create_valid_video(ref_path: Path, ref_path2: Optional[Path], dur: int, res: str, prompt: str, cam: str, mode: str, out_path: Path) -> bool:
-    """
-    Uses imageio-ffmpeg libx264 - ALWAYS valid MP4, no gray dots corruption
-    Visible motion even with static camera
-    """
+def create_video(ref_path: Path, ref_path2: Optional[Path], dur: int, res: str, prompt: str, cam: str, mode: str, out_path: Path) -> bool:
     try:
         from PIL import Image
         import numpy as np
         import imageio.v2 as imageio
 
         out_w, out_h, orig_w, orig_h, aspect = get_output_size(ref_path, res)
-        logger.info(f"Creating VALID MP4: {orig_w}x{orig_h} -> {out_w}x{out_h} dur={dur}s prompt={prompt[:40]}")
+        logger.info(f"Creating MP4: {orig_w}x{orig_h} -> {out_w}x{out_h} dur={dur}")
 
         img1 = Image.open(ref_path).convert("RGB")
         img2 = None
@@ -83,24 +61,21 @@ def create_valid_video(ref_path: Path, ref_path2: Optional[Path], dur: int, res:
 
         num_frames = dur * fps
         low = prompt.lower()
-        has_cam_kw = any(k in low for k in ["pan left","pan right","zoom in","zoom out","dolly","orbit"])
+        has_cam_kw = any(k in low for k in ["pan left","pan right","zoom in","zoom out"])
         is_static = (cam == "static" and not has_cam_kw)
-
         is_wind = any(k in low for k in ["wind","blowing","breeze","hair"])
         is_smile = any(k in low for k in ["smile","laugh","grin","happy","talk"])
 
         for i in range(num_frames):
             prog = i / num_frames
-
-            # Base frame
             if img2 is not None and mode == "first_last":
                 base = Image.blend(img1, img2, prog).resize((out_w, out_h), Image.LANCZOS)
             else:
                 base = img1.resize((out_w, out_h), Image.LANCZOS)
 
             if is_static:
-                scale = 1.0 + prog * 0.08  # 8% visible zoom
-                extra_x = int(6 * math.sin(prog * 12 * 3.14159)) if is_wind else 0)
+                scale = 1.0 + prog * 0.08
+                extra_x = int(6 * math.sin(prog * 12 * 3.14159)) if is_wind else 0
                 extra_y = int(3 * math.sin(prog * 8 * 3.14159)) if is_smile else 0
                 big_w = int(out_w * scale)
                 big_h = int(out_h * scale)
@@ -124,68 +99,21 @@ def create_valid_video(ref_path: Path, ref_path2: Optional[Path], dur: int, res:
                 cy = (big_h - out_h)//2
                 frame_pil = big_img.crop((cx, cy, cx+out_w, cy+out_h))
 
-            frame_np = np.array(frame_pil)
-            writer.append_data(frame_np)
+            writer.append_data(np.array(frame_pil))
 
         writer.close()
-        size = out_path.stat().st_size if out_path.exists() else 0
-        logger.info(f"VALID MP4 created: {out_path} {size} bytes - NO CORRUPTION")
-        return size > 5000
+        return out_path.exists() and out_path.stat().st_size > 5000
     except Exception as e:
-        logger.exception(f"video creation failed {e}")
+        logger.exception(f"failed {e}")
         return False
-
-async def try_wan_space(image_path: Path, prompt: str, neg: str, duration: int):
-    try:
-        from gradio_client import Client, handle_file
-        import httpx
-        for space_id in FREE_13B_SPACES:
-            try:
-                logger.info(f"Trying FREE Wan 1.3B space: {space_id}")
-                client = Client(space_id, download_files=True)
-                result = client.predict(
-                    image=handle_file(str(image_path)),
-                    prompt=prompt,
-                    negative_prompt=neg or "low quality, blurry",
-                    num_frames=duration * 8,
-                    guidance_scale=5.0,
-                    num_inference_steps=25,
-                    seed=0,
-                    api_name="/predict"
-                )
-                video_path = None
-                if isinstance(result, str) and os.path.exists(result):
-                    video_path = Path(result)
-                elif isinstance(result, (list, tuple)) and len(result) > 0:
-                    first = result[0]
-                    if isinstance(first, str) and os.path.exists(first):
-                        video_path = Path(first)
-                elif isinstance(result, str) and result.startswith("http"):
-                    dest = VIDEO_DIR / f"{uuid.uuid4()}.mp4"
-                    async with httpx.AsyncClient(timeout=120) as hc:
-                        r = await hc.get(result, follow_redirects=True)
-                        dest.write_bytes(r.content)
-                        if dest.stat().st_size > 5000:
-                            return dest
-                if video_path and video_path.exists() and video_path.stat().st_size > 5000:
-                    dest = VIDEO_DIR / f"{uuid.uuid4()}.mp4"
-                    shutil.copy(video_path, dest)
-                    return dest
-            except Exception as e:
-                logger.warning(f"Space {space_id} failed: {e}")
-                continue
-        return None
-    except Exception as e:
-        logger.warning(f"Space attempt failed: {e}")
-        return None
 
 @app.get("/")
 def root():
-    return {"service": "AppImgVid-backend2026", "model": "Wan 2.1 1.3B CORRUPTION+DOWNLOAD FIX", "free": True}
+    return {"service": "AppImgVid-backend2026", "model": "Wan 2.1 1.3B 100% FREE", "free": True}
 
 @app.get("/health")
 def health():
-    return {"ok": True, "model": "Wan 2.1 1.3B FIXED", "free": True}
+    return {"ok": True, "free": True}
 
 @app.post("/api/generate")
 async def generate(
@@ -214,20 +142,12 @@ async def generate(
 
         final_prompt = motion_prompt
         if camera_control == "static":
-            final_prompt = f"{motion_prompt}, static camera, fixed shot"
-
-        wan_path = await try_wan_space(p1, final_prompt, negative_prompt, dur)
+            final_prompt = f"{motion_prompt}, static camera"
 
         out_path = VIDEO_DIR / f"{job_id}.mp4"
-        if wan_path and wan_path.exists() and wan_path.stat().st_size > 5000:
-            shutil.copy(wan_path, out_path)
-            real_ai = True
-        else:
-            logger.info("Using VALID fallback with imageio-ffmpeg")
-            ok = create_valid_video(p1, p2, dur, resolution, final_prompt, camera_control, mode, out_path)
-            if not ok:
-                raise Exception("Video creation failed")
-            real_ai = False
+        ok = create_video(p1, p2, dur, resolution, final_prompt, camera_control, mode, out_path)
+        if not ok:
+            raise Exception("Video creation failed")
 
         base = os.getenv("RENDER_EXTERNAL_URL") or f"https://{os.getenv('RENDER_SERVICE_NAME', 'appimgvid-backend2026')}.onrender.com"
         if not base.startswith("http"): base = f"https://{base}"
@@ -239,13 +159,10 @@ async def generate(
             "video_url": video_url,
             "download_url": download_url,
             "status": "done",
-            "model": "Wan 2.1 1.3B FIXED",
-            "real_ai": real_ai,
             "size": out_path.stat().st_size,
             "duration": dur,
             "resolution": resolution,
-            "free": True,
-            "corruption_fix": True
+            "free": True
         })
     except Exception as e:
         logger.exception("generate failed")
@@ -259,19 +176,9 @@ def get_video(filename: str):
 
 @app.get("/api/download/{filename}")
 def download_video(filename: str):
-    """Fixed download endpoint with proper headers for Android DownloadManager"""
     f = VIDEO_DIR / filename
-    if not f.exists(): raise HTTPException(404, "File not found - Render free tier clears /tmp on restart, regenerate")
-    return FileResponse(
-        f,
-        media_type="video/mp4",
-        filename=filename,
-        headers={
-            "Content-Disposition": f"attachment; filename={filename}",
-            "Accept-Ranges": "bytes",
-            "Cache-Control": "public, max-age=86400"
-        }
-    )
+    if not f.exists(): raise HTTPException(404, "Not found")
+    return FileResponse(f, media_type="video/mp4", filename=filename, headers={"Content-Disposition": f"attachment; filename={filename}"})
 
 if __name__ == "__main__":
     import uvicorn
