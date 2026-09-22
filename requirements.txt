@@ -1,11 +1,9 @@
-# FINAL FIX - Python 3.14 + aspect ratio + static camera + motion prompt
+# Wan 2.1 1.3B I2V - 100% FREE - NO API KEYS - Python 3.14 compatible
 fastapi>=0.115.0
 uvicorn[standard]>=0.30.0
 python-multipart>=0.0.9
+gradio_client>=1.3.0
 httpx>=0.27.0
 opencv-python-headless>=4.10.0.84
 Pillow>=11.0.0
 numpy>=1.26.0
-# Optional for real Wan 2.1 AI motion (free tier at fal.ai):
-fal-client>=0.4.8
-gradio_client>=1.3.0
