@@ -1,4 +1,3 @@
-
 import os, uuid, shutil, logging, math
 from pathlib import Path
 from typing import Optional
@@ -47,32 +46,26 @@ def create_video(ref_path: Path, ref_path2: Optional[Path], dur: int, res: str, 
         from PIL import Image
         import numpy as np
         import imageio.v2 as imageio
-
         out_w, out_h, orig_w, orig_h, aspect = get_output_size(ref_path, res)
         logger.info(f"Creating MP4: {orig_w}x{orig_h} -> {out_w}x{out_h} dur={dur}")
-
         img1 = Image.open(ref_path).convert("RGB")
         img2 = None
         if mode == "first_last" and ref_path2 and ref_path2.exists():
             img2 = Image.open(ref_path2).convert("RGB")
-
         fps = 8
         writer = imageio.get_writer(str(out_path), fps=fps, codec="libx264", quality=8, macro_block_size=1, ffmpeg_params=["-pix_fmt","yuv420p"])
-
         num_frames = dur * fps
         low = prompt.lower()
         has_cam_kw = any(k in low for k in ["pan left","pan right","zoom in","zoom out"])
         is_static = (cam == "static" and not has_cam_kw)
         is_wind = any(k in low for k in ["wind","blowing","breeze","hair"])
         is_smile = any(k in low for k in ["smile","laugh","grin","happy","talk"])
-
         for i in range(num_frames):
             prog = i / num_frames
             if img2 is not None and mode == "first_last":
                 base = Image.blend(img1, img2, prog).resize((out_w, out_h), Image.LANCZOS)
             else:
                 base = img1.resize((out_w, out_h), Image.LANCZOS)
-
             if is_static:
                 scale = 1.0 + prog * 0.08
                 extra_x = int(6 * math.sin(prog * 12 * 3.14159)) if is_wind else 0
@@ -98,9 +91,7 @@ def create_video(ref_path: Path, ref_path2: Optional[Path], dur: int, res: str, 
                 cx = (big_w - out_w)//2
                 cy = (big_h - out_h)//2
                 frame_pil = big_img.crop((cx, cy, cx+out_w, cy+out_h))
-
             writer.append_data(np.array(frame_pil))
-
         writer.close()
         return out_path.exists() and out_path.stat().st_size > 5000
     except Exception as e:
@@ -135,25 +126,20 @@ async def generate(
         if mode == "first_last" and image2:
             p2 = UPLOAD_DIR / f"{job_id}_2.jpg"
             with p2.open("wb") as f: shutil.copyfileobj(image2.file, f)
-
         try: dur = int(duration)
         except: dur = 5
         dur = max(3, min(20, dur))
-
         final_prompt = motion_prompt
         if camera_control == "static":
             final_prompt = f"{motion_prompt}, static camera"
-
         out_path = VIDEO_DIR / f"{job_id}.mp4"
         ok = create_video(p1, p2, dur, resolution, final_prompt, camera_control, mode, out_path)
         if not ok:
             raise Exception("Video creation failed")
-
         base = os.getenv("RENDER_EXTERNAL_URL") or f"https://{os.getenv('RENDER_SERVICE_NAME', 'appimgvid-backend2026')}.onrender.com"
         if not base.startswith("http"): base = f"https://{base}"
         video_url = f"{base}/videos/{out_path.name}"
         download_url = f"{base}/api/download/{out_path.name}"
-
         return JSONResponse({
             "job_id": job_id,
             "video_url": video_url,
